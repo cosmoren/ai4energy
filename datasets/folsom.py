@@ -153,11 +153,6 @@ class FolsomDataset(Dataset):
         if len(self.selected_keys) != N:
             print(f"Warning: Selected {len(self.selected_keys)} irradiance keys, but only {len(self.target_dict)} target keys exist")
             self.selected_keys = self.selected_keys[:len(self.target_dict)]
-        self.selected_keys = random.sample(list(self.irradiance_dict.keys()), N)
-        self.selected_keys = [key for key in self.selected_keys if key in self.target_dict]
-        if len(self.selected_keys) != N:
-            print(f"Warning: Selected {len(self.selected_keys)} irradiance keys, but only {len(self.target_dict)} target keys exist")
-            self.selected_keys = self.selected_keys[:len(self.target_dict)]
     
     def __len__(self):
         return len(self.selected_keys)
@@ -211,11 +206,14 @@ class FolsomDataset(Dataset):
             images_tensor = torch.cat([zero_padding, images_tensor], dim=0)
 
         # Convert irradiance_data and target_data dictionaries to tensors
-        irradiance_tensor = torch.tensor([irradiance_data[key] for key in sorted(irradiance_data.keys())], dtype=torch.float32)
-        target_tensor = torch.tensor([target_data['ghi_kt_5min'],target_data['dni_kt_5min'], target_data['ghi_kt_10min'], target_data['dni_kt_10min'], 
-                                      target_data['ghi_kt_15min'],target_data['dni_kt_15min'], target_data['ghi_kt_20min'], target_data['dni_kt_20min'], 
-                                      target_data['ghi_kt_25min'],target_data['dni_kt_25min'], target_data['ghi_kt_30min'], target_data['dni_kt_30min']], dtype=torch.float32)
+        irradiance_tensor = torch.fliplr(torch.tensor([irradiance_data[key] for key in irradiance_data.keys()], dtype=torch.float32).reshape(6, 6)) # [Channel, T]     
         
+        target_tensor = torch.tensor([[target_data['ghi_kt_5min'], target_data['ghi_kt_10min'], target_data['ghi_kt_15min'],
+                                       target_data['ghi_kt_20min'], target_data['ghi_kt_25min'], target_data['ghi_kt_30min']],
+                                      [target_data['dni_kt_5min'], target_data['dni_kt_10min'], target_data['dni_kt_15min'],
+                                       target_data['dni_kt_20min'], target_data['dni_kt_25min'], target_data['dni_kt_30min']]],
+                                      dtype=torch.float32)  #[Dim, T]
+
         # Return in standard PyTorch dataloader format (dictionary)
         return {
             'timestamp': timestamp_str,

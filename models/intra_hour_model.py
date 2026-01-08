@@ -26,6 +26,60 @@ class TemporalConvPool(nn.Module):
         return x
 
 
+class SmallTCN(nn.Module):
+    def __init__(self, D, D_enc=256):
+        super().__init__()
+        self.in_proj = nn.Conv1d(D, D_enc, 1)
+        self.conv = nn.Sequential(
+            nn.Conv1d(D_enc, D_enc, 3, padding=1),
+            nn.GELU(),
+            nn.Conv1d(D_enc, D_enc, 3, padding=1),
+            nn.GELU(),
+        )
+
+    def forward(self, x):        # [B,D,T]
+        x = self.in_proj(x)      # [B,D_enc,T]
+        x = self.conv(x)         # [B,D_enc,T]
+        return x.mean(dim=-1)    # [B,D_enc]
+
+
+
+class HorizonHead(nn.Module):
+    def __init__(self, z_dim=512, h_dim=64, hidden=256, out_channels=2, T=6):
+        super().__init__()
+        self.T = T
+        self.out_channels = out_channels
+
+        self.fuse = nn.Sequential(
+            nn.LayerNorm(1024),
+            nn.Linear(1024, z_dim),
+            nn.GELU(),
+        )
+
+        self.h_emb = nn.Embedding(T, h_dim)
+
+        self.mlp = nn.Sequential(
+            nn.LayerNorm(z_dim + h_dim),
+            nn.Linear(z_dim + h_dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, out_channels),
+        )
+
+    def forward(self, z):
+        B = z.shape[0]
+
+        h = torch.arange(self.T, device=z.device)           # [T]
+        e = self.h_emb(h).unsqueeze(0).expand(B, -1, -1)    # [B,T,h_dim]
+        z_rep = z.unsqueeze(1).expand(-1, self.T, -1)       # [B,T,z_dim]
+
+        inp = torch.cat([z_rep, e], dim=-1)                 # [B,T,z_dim+h_dim]
+        y = self.mlp(inp)                                   # [B,T,2]
+        # Apply sigmoid to get [0, 1] range, then scale to [0, 1.2]
+        y = torch.sigmoid(y) * 1.2                          # [B,T,2] -> [0, 1.2]
+        return y.permute(0, 2, 1).contiguous()              # [B,2,T]
+
 class intra_hour_model(nn.Module):
     """
     Complete model for intra-hour forecasting.
@@ -42,9 +96,8 @@ class intra_hour_model(nn.Module):
         image_size: int = 448,
         num_frames: int = 30,
         video_embed_dim: int = 1024,
-        irradiance_dim: int = 36,  # Will be inferred from data
-        target_dim: int = 12,  # Will be inferred from data
-        hidden_dim: int = 512,
+        output_channels: int = 2,  # Will be inferred from data
+        hidden_dim: int = 256,
         dropout: float = 0.1,
         **kwargs
     ):
@@ -62,8 +115,7 @@ class intra_hour_model(nn.Module):
         super().__init__()
         self.num_frames = num_frames
         self.video_embed_dim = video_embed_dim
-        self.irradiance_dim = irradiance_dim
-        self.target_dim = target_dim
+        self.output_channels = output_channels
         self.hidden_dim = hidden_dim
         self.image_size = image_size
 
@@ -71,16 +123,7 @@ class intra_hour_model(nn.Module):
         self.temporal_conv_pool = TemporalConvPool(16, hidden_dim)
         
         # Irradiance feature processing
-        self.irradiance_encoder = nn.Sequential(
-            nn.Linear(irradiance_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout)
-        )
+        self.irradiance_encoder = SmallTCN(D=6, D_enc=hidden_dim)
         
         # Define a custom scaling layer for [0, 1.2] range
         class ScaleLayer(nn.Module):
@@ -91,20 +134,7 @@ class intra_hour_model(nn.Module):
             def forward(self, x):
                 return x * self.scale
         
-        self.fusion_layer = nn.Sequential(
-            nn.Linear(2*hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, target_dim),
-            # Use sigmoid to get [0, 1] range, then scale to [0, 1.2]
-            nn.Sigmoid(),
-            ScaleLayer(scale=1.2)
-        )
+        self.fusion_layer = HorizonHead(z_dim=hidden_dim*2, h_dim=64, hidden=hidden_dim, out_channels=output_channels, T=6)
     
     def forward(
         self, 
@@ -147,6 +177,7 @@ class intra_hour_model(nn.Module):
         video_encoded = self.temporal_conv_pool(video_features)  # [B, hidden_dim]
     
         irradiance_encoded = self.irradiance_encoder(irradiance)  # [B, hidden_dim]
+
 
         # Fuse video and irradiance features
         fused = torch.cat([video_encoded, irradiance_encoded], dim=1)  # [B, 2*hidden_dim]

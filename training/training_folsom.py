@@ -73,7 +73,7 @@ def main():
     num_epochs = 10
     global_step = 0
     for epoch in range(num_epochs):
-        # model.train()
+        model.train()
         for batch_idx, batch in enumerate(train_loader):
             optimizer.zero_grad()  # Zero gradients before each backward pass
             
