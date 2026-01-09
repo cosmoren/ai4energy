@@ -159,7 +159,10 @@ class Evaluation:
             }
 
             # baseline
-            base = test[cfg["baseline_col"](horizon)].values * clear
+            if eval_type == "day-ahead":
+                base = test[cfg["baseline_col"](horizon)].values
+            else:
+                base = test[cfg["baseline_col"](horizon)].values * clear
             base[elev < 5] = np.nan
 
             out[cfg["baseline_name"]] = {
