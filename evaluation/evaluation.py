@@ -250,15 +250,17 @@ class Evaluation:
 
 if __name__ == "__main__":
     # a demo
-    test_result = np.zeros((48401, 6)) # 48357 non-nan samples in intra-day dataset, 6 horizons.
+    test_result_intra_hour = np.zeros((48401, 6)) # 48357 non-nan samples in intra-day dataset, 6 horizons.
+    test_result_intra_day = np.zeros((8068, 6))
+    test_result_day_ahead = np.zeros((365, 14))
     # test_result in kt, no units
     # eval outputs RMSE / MAE / MBE / Skill
 
     evaluator = Evaluation()
     df = evaluator.eval(
-        eval_type="intra-hour",
+        eval_type="day-ahead",
         target="ghi",
         model_name="my_model",
-        result=test_result,   # shape [N, 6]
+        result=test_result_day_ahead,   # shape [N, 6]
     )
     print(df)
