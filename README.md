@@ -120,3 +120,61 @@ L(ghi_kt|30min)     1
 L(ghi_kt|20min)     1
 L(ghi_kt|15min)     1
 L(ghi_kt|5min)      1
+
+A. Statistical Operators
+
+| Abbreviation | Meaning            | Description                                                 |
+| ------------ | ------------------ | ----------------------------------------------------------- |
+| `AVG`        | Average (Mean)     | Mean value of all pixels in the image or values in a window |
+| `STD`        | Standard Deviation | Measure of variability or spread                            |
+| `ENT`        | Entropy            | Shannon entropy, measuring distribution complexity          |
+
+B. Image Color Channels and Ratios
+
+| Abbreviation | Meaning                      | Description                                                 |
+| ------------ | ---------------------------- | ----------------------------------------------------------- |
+| `R`          | Red channel                  | Red color intensity from RGB sky image                      |
+| `G`          | Green channel                | Green color intensity from RGB sky image                    |
+| `B`          | Blue channel                 | Blue color intensity from RGB sky image                     |
+| `RB`         | Red-to-Blue ratio            | ( R / B ), commonly used cloud indicator                    |
+| `NRB`        | Normalized Red-to-Blue ratio | ( (R - B) / (R + B) ), illumination-normalized cloud metric |
+
+C. Sky Image Features (Combined Form)
+
+| Feature Name | Meaning                                            |
+| ------------ | -------------------------------------------------- |
+| `AVG(R)`     | Mean of red channel pixel values                   |
+| `STD(G)`     | Standard deviation of green channel pixels         |
+| `ENT(B)`     | Entropy of blue channel pixel distribution         |
+| `AVG(RB)`    | Mean red-to-blue ratio                             |
+| `STD(NRB)`   | Standard deviation of normalized red-to-blue ratio |
+| `ENT(NRB)`   | Entropy of normalized red-to-blue ratio            |
+
+D. Irradiance and Clear-Sky Index Features
+
+| Abbreviation     | Meaning                           | Description                                       |
+| ---------------- | --------------------------------- | ------------------------------------------------- |
+| `ghi`            | Global Horizontal Irradiance      | Measured solar irradiance on a horizontal surface |
+| `ghi_clear`      | Clear-sky GHI                     | Modeled clear-sky irradiance                      |
+| `ghi_kt`         | Clear-sky index of GHI            | ( k_t = \frac{\text{ghi}}{\text{ghi_clear}} )     |
+| `ghi_5min`       | 5-minute averaged GHI             | Mean GHI over last 5 minutes                      |
+| `ghi_clear_5min` | 5-minute averaged clear-sky GHI   | Clear-sky reference for normalization             |
+| `ghi_kt_5min`    | 5-minute averaged clear-sky index | Normalized irradiance                             |
+
+E. Lagged Time-Series Features
+
+| Abbreviation       | Meaning                              | Description                                         |
+| ------------------ | ------------------------------------ | --------------------------------------------------- |
+| `L(ghi_kt\|5min)`  | Lagged average of kt (last 5 min)    | Mean clear-sky index over the most recent 5 minutes |
+| `L(ghi_kt\|10min)` | Lagged average of kt (5–10 min ago)  | Mean clear-sky index in previous window             |
+| `L(ghi_kt\|15min)` | Lagged average of kt (10–15 min ago) | Older irradiance behavior                           |
+| `L(ghi_kt\|20min)` | Lagged average of kt (15–20 min ago) |                                                     |
+| `L(ghi_kt\|25min)` | Lagged average of kt (20–25 min ago) |                                                     |
+| `L(ghi_kt\|30min)` | Lagged average of kt (25–30 min ago) |                                                     |
+
+F. Solar Geometry Feature
+
+| Abbreviation     | Meaning               | Description                                            |
+| ---------------- | --------------------- | ------------------------------------------------------ |
+| `elevation_5min` | Solar elevation angle | Average solar elevation angle over 5 minutes (degrees) |
+
