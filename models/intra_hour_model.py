@@ -1,6 +1,15 @@
 import torch
 import torch.nn as nn
 from typing import Optional
+import sys
+from pathlib import Path
+
+# Add models directory to path so simvp can be imported as a top-level module
+# This allows simvp files to use "from simvp.xxx" imports without modification
+models_dir = Path(__file__).parent
+if str(models_dir) not in sys.path:
+    sys.path.insert(0, str(models_dir))
+
 from .simvp.models import SimVP_Model
 
 class TemporalConvPool(nn.Module):
