@@ -24,16 +24,8 @@ class FolsomDataset(Dataset):
         root_dir: str = "/mnt/nfs/yuan/Folsom",
         split: Literal["train", "test"] = "train",
         image_extensions: tuple = (".jpg", ".jpeg", ".png"),
-<<<<<<< HEAD
         sample_num: int = 100000,
         image_size: int = 224
-||||||| 8ec7d1a
-        sample_num: int = 100000,
-        image_size: int = 448
-=======
-        sample_num: Optional[int] = None,
-        image_size: int = 448
->>>>>>> add-pvinsight
     ):
         """
         Initialize the Folsom dataset.
@@ -154,7 +146,6 @@ class FolsomDataset(Dataset):
         
         print(f"Loaded {len(self.image_paths)} images for {split} set")
 
-<<<<<<< HEAD
         # Select keys based on split type
         if split == "test":
             # For test split, use all available keys (no random sampling)
@@ -168,29 +159,6 @@ class FolsomDataset(Dataset):
             if len(self.selected_keys) != N:
                 print(f"Warning: Selected {len(self.selected_keys)} irradiance keys, but only {len(self.target_dict)} target keys exist")
                 self.selected_keys = self.selected_keys[:len(self.target_dict)]
-||||||| 8ec7d1a
-        # Random select N keys from self.irradiance_dict and check these keys exist in self.target_dict
-        N = sample_num
-        self.selected_keys = random.sample(list(self.irradiance_dict.keys()), N)
-        self.selected_keys = [key for key in self.selected_keys if key in self.target_dict]
-        if len(self.selected_keys) != N:
-            print(f"Warning: Selected {len(self.selected_keys)} irradiance keys, but only {len(self.target_dict)} target keys exist")
-            self.selected_keys = self.selected_keys[:len(self.target_dict)]
-=======
-        # Get available keys (intersection of irradiance and target dicts)
-        available_keys = list(set(self.irradiance_dict.keys()) & set(self.target_dict.keys()))
-        
-        # Select keys: if sample_num is None, use all available; otherwise sample N
-        if sample_num is None:
-            self.selected_keys = available_keys
-            print(f"Using all {len(self.selected_keys)} available samples")
-        else:
-            if len(available_keys) < sample_num:
-                print(f"Warning: Only {len(available_keys)} keys available, requested {sample_num}. Using all available.")
-                self.selected_keys = available_keys
-            else:
-                self.selected_keys = random.sample(available_keys, sample_num)
->>>>>>> add-pvinsight
     
     def __len__(self):
         return len(self.selected_keys)
