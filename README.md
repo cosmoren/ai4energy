@@ -75,3 +75,48 @@ To add a new package to the project:
 uv add <package-name>
 uv sync
 ```
+
+### know issues
+In the intra-day training test, following columns contrain NaN. The numbers are samples that are NaN.
+STD(RB)            2306
+STD(NRB)           2306
+AVG(NRB)           2306
+ENT(NRB)           2306
+STD(B)             2306
+AVG(G)             2306
+AVG(B)             2306
+STD(G)             2306
+ENT(G)             2306
+STD(R)             2306
+AVG(RB)            2306
+ENT(B)             2306
+ENT(RB)            2306
+AVG(R)             2306
+ENT(R)             2306
+
+In the intra-day test test, following columns contrain NaN. The numbers are samples that are NaN.
+STD(RB)            44
+STD(NRB)           44
+AVG(NRB)           44
+ENT(NRB)           44
+STD(B)             44
+AVG(G)             44
+AVG(B)             44
+STD(G)             44
+ENT(G)             44
+STD(R)             44
+AVG(RB)            44
+ENT(B)             44
+ENT(RB)            44
+AVG(R)             44
+ENT(R)             44
+L(ghi_kt|25min)     1
+ghi_kt_5min         1
+ghi_5min            1
+elevation_5min      1
+ghi_clear_5min      1
+L(ghi_kt|10min)     1
+L(ghi_kt|30min)     1
+L(ghi_kt|20min)     1
+L(ghi_kt|15min)     1
+L(ghi_kt|5min)      1
