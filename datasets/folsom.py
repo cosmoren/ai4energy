@@ -25,7 +25,7 @@ class FolsomDataset(Dataset):
         split: Literal["train", "test"] = "train",
         image_extensions: tuple = (".jpg", ".jpeg", ".png"),
         sample_num: int = 100000,
-        image_size: int = 448
+        image_size: int = 224
     ):
         """
         Initialize the Folsom dataset.
@@ -146,13 +146,19 @@ class FolsomDataset(Dataset):
         
         print(f"Loaded {len(self.image_paths)} images for {split} set")
 
-        # Random select N keys from self.irradiance_dict and check these keys exist in self.target_dict
-        N = sample_num
-        self.selected_keys = random.sample(list(self.irradiance_dict.keys()), N)
-        self.selected_keys = [key for key in self.selected_keys if key in self.target_dict]
-        if len(self.selected_keys) != N:
-            print(f"Warning: Selected {len(self.selected_keys)} irradiance keys, but only {len(self.target_dict)} target keys exist")
-            self.selected_keys = self.selected_keys[:len(self.target_dict)]
+        # Select keys based on split type
+        if split == "test":
+            # For test split, use all available keys (no random sampling)
+            self.selected_keys = [key for key in self.irradiance_dict.keys() if key in self.target_dict]
+            print(f"Test set: Using all {len(self.selected_keys)} available samples (no random sampling)")
+        else:
+            # For train split, randomly sample N keys
+            N = sample_num
+            self.selected_keys = random.sample(list(self.irradiance_dict.keys()), N)
+            self.selected_keys = [key for key in self.selected_keys if key in self.target_dict]
+            if len(self.selected_keys) != N:
+                print(f"Warning: Selected {len(self.selected_keys)} irradiance keys, but only {len(self.target_dict)} target keys exist")
+                self.selected_keys = self.selected_keys[:len(self.target_dict)]
     
     def __len__(self):
         return len(self.selected_keys)
@@ -179,7 +185,7 @@ class FolsomDataset(Dataset):
         for img_path in image_paths_in_window:
             try:
                 img = Image.open(img_path)
-                img = img.resize((self.image_size, self.image_size))
+                # img = img.resize((self.image_size, self.image_size))
                 images.append(img)
             except Exception as e:
                 print(f"Warning: Failed to load image {img_path}: {e}")

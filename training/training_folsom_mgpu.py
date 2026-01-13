@@ -94,7 +94,7 @@ def main():
         print(f"  Training batches per GPU: {len(train_loader)}")
     
     # Create model and move to device
-    model = intra_hour_model().to(device)
+    model = intra_hour_model(image_size=224).to(device)
     
     # Wrap model with DDP
     # find_unused_parameters=True is needed when some parameters don't receive gradients
@@ -116,7 +116,7 @@ def main():
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         print(f"Checkpoints will be saved to: {checkpoint_dir}")
     
-    num_epochs = 10
+    num_epochs = 20
     global_step = 0
     
     for epoch in range(num_epochs):
