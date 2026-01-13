@@ -16,7 +16,7 @@ class Evaluation:
         pandas DataFrame with RMSE / MAE / MBE / Skill
     """
 
-    def __init__(self, base_dir="/mnt/glusterfs/Planning/data/folsom/unzipped"):
+    def __init__(self, base_dir="/mnt/nfs/yuan/Folsom"):
         self.base_dir = base_dir
 
     # =====================================================
@@ -125,6 +125,12 @@ class Evaluation:
             index_col=0,
         )
 
+        # Sanity check: print dataset size before filtering
+        test_before_filter = inpEndo[inpEndo.index.year == 2016]
+        test_before_filter = test_before_filter.join(inpExo[inpEndo.index.year == 2016], how="inner")
+        test_before_filter = test_before_filter.join(tar[tar.index.year == 2016], how="inner")
+        print(f"Dataset size before filtering: {len(test_before_filter)} samples")
+
         results = {target: {}}
 
         for t_idx, horizon in enumerate(horizons):
@@ -142,28 +148,50 @@ class Evaluation:
             test = test.join(tar[tar.index.year == 2016], how="inner")
             feature_cols_endo = inpEndo.filter(regex=target).columns.tolist()
             feature_cols_exo = feature_cols_endo + inpExo.columns.tolist()
-            test  = test[cols + feature_cols_exo].dropna()
-
-            y_true = test[f"{target}_{horizon}"].values
-            clear = test[f"{target}_clear_{horizon}"].values
-            elev = test[f"elevation_{horizon}"].values
-
-            # model prediction
-            y_pred = np.clip(result[:, t_idx], 0, 1.1)
-            y_pred = y_pred * clear
-            y_pred[elev < 5] = np.nan
+            # Don't dropna here - we'll filter after aligning with predictions
+            
+            # Get all required columns first
+            y_true_all = test[f"{target}_{horizon}"].values
+            clear_all = test[f"{target}_clear_{horizon}"].values
+            elev_all = test[f"elevation_{horizon}"].values
+            
+            # Prepare model predictions for all samples (before filtering)
+            # result shape is [N_test, T_horizons] where N_test should match test dataset size
+            if result.shape[0] != len(test):
+                raise ValueError(
+                    f"Prediction shape mismatch: got {result.shape[0]} predictions, "
+                    f"expected {len(test)} samples from test dataset"
+                )
+            
+            y_pred_all = np.clip(result[:, t_idx], 0, 1.1)
+            y_pred_all = y_pred_all * clear_all
+            y_pred_all[elev_all < 5] = np.nan
+            
+            # Now filter NaN values from ground truth and apply same mask to predictions
+            # This ensures both GT and predictions are filtered identically
+            valid_mask = ~np.isnan(y_true_all)
+            # Also filter out low elevation angles
+            valid_mask = valid_mask & (elev_all >= 5)
+            
+            y_true = y_true_all[valid_mask]
+            y_pred = y_pred_all[valid_mask]
+            clear = clear_all[valid_mask]
+            elev = elev_all[valid_mask]
 
             out[model_name] = {
                 "y_true": y_true,
                 "y_pred": y_pred,
             }
 
-            # baseline
+            # baseline - apply same filtering mask
             if eval_type == "day-ahead":
-                base = test[cfg["baseline_col"](horizon)].values
+                base_all = test[cfg["baseline_col"](horizon)].values
             else:
-                base = test[cfg["baseline_col"](horizon)].values * clear
-            base[elev < 5] = np.nan
+                base_all = test[cfg["baseline_col"](horizon)].values * clear_all
+            base_all[elev_all < 5] = np.nan
+            
+            # Apply same valid_mask to baseline
+            base = base_all[valid_mask]
 
             out[cfg["baseline_name"]] = {
                 "y_true": y_true,
@@ -222,7 +250,7 @@ class Evaluation:
 
 if __name__ == "__main__":
     # a demo
-    test_result = np.zeros((48357, 6)) # 48357 non-nan samples in intra-day dataset, 6 horizons.
+    test_result = np.zeros((48401, 6)) # 48357 non-nan samples in intra-day dataset, 6 horizons.
     # test_result in kt, no units
     # eval outputs RMSE / MAE / MBE / Skill
 
