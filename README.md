@@ -121,6 +121,8 @@ L(ghi_kt|20min)     1
 L(ghi_kt|15min)     1
 L(ghi_kt|5min)      1
 
+The meaning of above column names:
+
 A. Statistical Operators
 
 | Abbreviation | Meaning            | Description                                                 |
