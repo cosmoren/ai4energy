@@ -77,7 +77,7 @@ uv sync
 ```
 
 ### know issues
-In the intra-day training test, following columns contrain NaN. The numbers are samples that are NaN.
+In the intra-day training set, following columns contrain NaN. The numbers are samples that are NaN.
 STD(RB)            2306
 STD(NRB)           2306
 AVG(NRB)           2306
@@ -94,7 +94,7 @@ ENT(RB)            2306
 AVG(R)             2306
 ENT(R)             2306
 
-In the intra-day test test, following columns contrain NaN. The numbers are samples that are NaN.
+In the intra-day test set, following columns contrain NaN. The numbers are samples that are NaN.
 STD(RB)            44
 STD(NRB)           44
 AVG(NRB)           44
