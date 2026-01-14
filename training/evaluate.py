@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import importlib
 
 import numpy as np
 import torch
@@ -7,20 +8,27 @@ from pytorch_lightning import Trainer
 from rich.console import Console
 from rich.table import Table
 
-# allow running as a script from repo root
 sys.path.append(str(Path(__file__).parent.parent))
+import yaml
 from datasets.lightning import FolsomDataModule
 from evaluation.evaluation import Evaluation
-from models.pvinsight import PVFormer
 
 
 if __name__ == "__main__":
     torch.set_float32_matmul_precision("medium")
 
-    checkpoint_path = "/mnt/nfs/slurm/home/mohammed2/with_yuan/ai4energy/runs/timesformer_lstm_attention/January-14-2026-09-26-03-PM/epoch_epoch=09-val_loss_val/loss=0.0562.ckpt"
+    checkpoint_path = "/mnt/nfs/slurm/home/mohammed2/with_yuan/ai4energy/runs/pvformer_intra_hour/January-14-2026-10-54-03-PM/epoch_epoch=02-val_loss_val/loss=0.0883.ckpt"
 
-    root_dir = "/mnt/nfs/yuan/Folsom"
-    image_size = 224
+    config_path = Path(checkpoint_path).parent.parent / "config.yaml"
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+
+    class_path = config["model"]["class_path"]
+    module_name, class_name = class_path.rsplit(".", 1)
+    ModelCls = getattr(importlib.import_module(module_name), class_name)
+
+    root_dir = config["data"]["root_dir"]
+    image_size = config["data"]["image_size"]
     batch_size = 16
     num_workers = 8
 
@@ -29,7 +37,7 @@ if __name__ == "__main__":
     if out_path.exists():
         preds = np.load(out_path)
     else:
-        model = PVFormer.load_from_checkpoint(checkpoint_path)
+        model = ModelCls.load_from_checkpoint(checkpoint_path)
 
         dm = FolsomDataModule(
             root_dir=root_dir,
@@ -43,7 +51,7 @@ if __name__ == "__main__":
         )
         dm.setup("test")
 
-        trainer = Trainer(accelerator="auto", devices=1, logger=False, enable_checkpointing=False)
+        trainer = Trainer(accelerator="auto", devices=1, logger=False, enable_checkpointing=False) # devices must be = 1 for validity
         preds = trainer.predict(model, dataloaders=dm.test_dataloader())
 
         preds = torch.cat([p.detach().cpu() for p in preds], dim=0).numpy()

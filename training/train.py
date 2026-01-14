@@ -27,6 +27,7 @@ if __name__ == "__main__":
         "cache_dir": None,
     }
     model_config = {
+        "class_path": "models.pvinsight.PVFormer",
         "image_size": image_size,
         "num_frames": 30,
         "output_channels": 2,
