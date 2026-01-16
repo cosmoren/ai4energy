@@ -163,7 +163,7 @@ class Evaluation:
                     f"expected {len(test)} samples from test dataset"
                 )
             
-            y_pred_all = np.clip(result[:, t_idx], 0, 1.1)
+            y_pred_all = result[:, t_idx]
             y_pred_all = y_pred_all * clear_all
             y_pred_all[elev_all < 5] = np.nan
             
@@ -249,16 +249,19 @@ class Evaluation:
         return df
 
 if __name__ == "__main__":
+    data = np.load('../aa.npy', allow_pickle=True).item()
+    # test_result = data['predictions_ghi']
+    test_result = data['predictions_dni']
     # a demo
-    test_result = np.zeros((48401, 6)) # 48357 non-nan samples in intra-day dataset, 6 horizons.
+    # test_result = np.zeros((48401, 6)) # 48357 non-nan samples in intra-day dataset, 6 horizons.
     # test_result in kt, no units
     # eval outputs RMSE / MAE / MBE / Skill
 
     evaluator = Evaluation()
     df = evaluator.eval(
         eval_type="intra-hour",
-        target="ghi",
-        model_name="my_model",
+        target="dni",
+        model_name="SimVPV2",
         result=test_result,   # shape [N, 6]
     )
     print(df)
