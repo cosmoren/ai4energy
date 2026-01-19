@@ -17,9 +17,20 @@ from evaluation.evaluation import Evaluation
 if __name__ == "__main__":
     torch.set_float32_matmul_precision("medium")
 
-    checkpoint_path = "/mnt/nfs/slurm/home/mohammed2/with_yuan/ai4energy/runs/pvformer_intra_hour/January-14-2026-10-54-03-PM/epoch_epoch=02-val_loss_val/loss=0.0883.ckpt"
+    checkpoint_path = ""
 
-    config_path = Path(checkpoint_path).parent.parent / "config.yaml"
+    ckpt_path = Path(checkpoint_path)
+    config_path_candidates = [
+        ckpt_path.parent / "config.yaml",
+        ckpt_path.parent.parent / "config.yaml",
+    ]
+    config_path = next((p for p in config_path_candidates if p.exists()), None)
+    if config_path is None:
+        raise FileNotFoundError(
+            "Could not find config.yaml next to checkpoint. Tried: "
+            + ", ".join(str(p) for p in config_path_candidates)
+        )
+
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 

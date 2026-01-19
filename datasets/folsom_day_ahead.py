@@ -231,25 +231,25 @@ class FolsomDayAheadDataset(Dataset):
         actual_idx = self.indices[idx]
         row = self.data.iloc[actual_idx]
         
+        out = {}
+
         # Extract features
         if self.feature_return == "flat":
-            # Endogenous + NAM cloud cover + NAM irradiance forecasts (backward compatible)
+            # Backward compatible: single stacked vector
             feature_values = row[self.feature_cols].values.astype(np.float32)
-            features = torch.tensor(feature_values, dtype=torch.float32)
+            out["features"] = torch.tensor(feature_values, dtype=torch.float32)
         elif self.feature_return == "structured":
-            # Structured features for multi-horizon / multi-target models
+            # Flat dict (no nesting)
             endo_values = row[self.feature_cols_endo].values.astype(np.float32)
-            endo = torch.tensor(endo_values, dtype=torch.float32)
+            out["endo"] = torch.tensor(endo_values, dtype=torch.float32)  # [D_endo]
 
             cc_cols = [f"nam_cc_{h}" for h in self.horizons]
             nam_cc_values = row[cc_cols].values.astype(np.float32)
-            nam_cc = torch.tensor(nam_cc_values, dtype=torch.float32)  # [num_horizons]
+            out["nam_cc"] = torch.tensor(nam_cc_values, dtype=torch.float32)  # [num_horizons]
 
             nam_cols = [f"nam_{t}_{h}" for t in self.targets for h in self.horizons]
             nam_values = row[nam_cols].values.astype(np.float32).reshape(len(self.targets), len(self.horizons))
-            nam = torch.tensor(nam_values, dtype=torch.float32)  # [num_targets, num_horizons]
-
-            features = {"endo": endo, "nam_cc": nam_cc, "nam": nam}
+            out["nam"] = torch.tensor(nam_values, dtype=torch.float32)  # [num_targets, num_horizons]
         else:
             raise ValueError(f"Unknown feature_return: {self.feature_return}")
         
@@ -340,15 +340,17 @@ class FolsomDayAheadDataset(Dataset):
             actual = actual.squeeze(1)  # [num_targets]
             nam_irr = nam_irr.squeeze(1)  # [num_targets]
         
-        return {
-            'features': features,  # Combined endogenous + exogenous features
-            'target': target,  # kt values [num_targets, num_horizons] or squeezed
-            'clear_sky': clear_sky,  # Clear-sky irradiance [num_targets, num_horizons] or squeezed
-            'elevation': elevation,  # Solar elevation [num_horizons] or scalar
-            'actual': actual,  # Irradiance [W/m^2] for selected target(s)/horizon(s)
-            'nam_irr': nam_irr,  # NAM irradiance baseline [W/m^2] for selected target(s)/horizon(s)
-            'timestamp': timestamp_str,  # Timestamp string
-        }
+        out.update(
+            {
+                "target": target,  # kt values [num_targets, num_horizons] or squeezed
+                "clear_sky": clear_sky,  # Clear-sky irradiance [num_targets, num_horizons] or squeezed
+                "elevation": elevation,  # Solar elevation [num_horizons] or scalar
+                "actual": actual,  # Irradiance [W/m^2] for selected target(s)/horizon(s)
+                "nam_irr": nam_irr,  # NAM irradiance baseline [W/m^2] for selected target(s)/horizon(s)
+                "timestamp": timestamp_str,
+            }
+        )
+        return out
     
     def get_endo_features_only(self, idx):
         """
@@ -453,9 +455,12 @@ def get_cache_key(
     sample_num: Optional[int],
     target: Optional[Union[str, List[str]]],
     horizon: Optional[Union[str, List[str]]],
+    feature_return: str,
 ) -> str:
     """Generate a cache key based on dataset parameters."""
-    key_string = f"{root_dir}_{split}_{sample_num}_{_to_hashable(target)}_{_to_hashable(horizon)}"
+    key_string = (
+        f"{root_dir}_{split}_{sample_num}_{_to_hashable(target)}_{_to_hashable(horizon)}_{feature_return}"
+    )
     return hashlib.md5(key_string.encode()).hexdigest()
 
 
@@ -469,6 +474,7 @@ class FolsomDayAheadDataModule(LightningDataModule):
         root_dir: str = "/mnt/nfs/yuan/Folsom",
         target: Optional[Union[str, List[str]]] = "ghi",
         horizon: Optional[Union[str, List[str]]] = "26h",
+        feature_return: Literal["flat", "structured"] = "flat",
         train_sample_num: Optional[int] = None,
         val_sample_num: Optional[int] = None,
         test_sample_num: Optional[int] = None,
@@ -486,6 +492,7 @@ class FolsomDayAheadDataModule(LightningDataModule):
         self.root_dir = root_dir
         self.target = target
         self.horizon = horizon
+        self.feature_return = feature_return
         self.train_sample_num = train_sample_num
         self.val_sample_num = val_sample_num
         self.test_sample_num = test_sample_num
@@ -532,6 +539,7 @@ class FolsomDayAheadDataModule(LightningDataModule):
             sample_num=sample_num,
             target=self.target,
             horizon=self.horizon,
+            feature_return=self.feature_return,
         )
         cache_file = self.cache_dir / f"dataset_{split}_{cache_key}.pkl"
 
@@ -546,6 +554,7 @@ class FolsomDayAheadDataModule(LightningDataModule):
             target=self.target,
             horizon=self.horizon,
             sample_num=sample_num,
+            feature_return=self.feature_return,
         )
 
         if self.use_cache:

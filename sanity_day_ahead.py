@@ -62,17 +62,15 @@ def run_forecast(target, horizon, root_dir="/mnt/nfs/yuan/Folsom", write_hdf: bo
     train_nam = train_batch["nam_irr"].numpy().reshape(-1)
     test_nam = test_batch["nam_irr"].numpy().reshape(-1)
 
-    # Structured feature blocks from __getitem__ (batched)
-    train_f = train_batch["features"]
-    test_f = test_batch["features"]
-    train_endo = train_f["endo"].numpy()
-    test_endo = test_f["endo"].numpy()
+    # Structured feature blocks from __getitem__ (batched, flat dict)
+    train_endo = train_batch["endo"].numpy()
+    test_endo = test_batch["endo"].numpy()
 
-    train_cc = train_f["nam_cc"].numpy()
-    test_cc = test_f["nam_cc"].numpy()
+    train_cc = train_batch["nam_cc"].numpy()
+    test_cc = test_batch["nam_cc"].numpy()
 
-    train_nam_feat = train_f["nam"].numpy().reshape(len(train_ds), -1)
-    test_nam_feat = test_f["nam"].numpy().reshape(len(test_ds), -1)
+    train_nam_feat = train_batch["nam"].numpy().reshape(len(train_ds), -1)
+    test_nam_feat = test_batch["nam"].numpy().reshape(len(test_ds), -1)
 
     X_sets = {
         "endo": (train_endo, test_endo),

@@ -57,9 +57,10 @@ class IntraHour(LightningModule):
         yhat = self(batch["images"], batch["irradiance"])
         y = batch["target"]
         loss = self.criterion(yhat, y)
-        self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
         self.log("val/mae", F.l1_loss(yhat, y), on_step=False, on_epoch=True, prog_bar=True, logger=True)
         self.log("val/rmse", torch.sqrt(F.mse_loss(yhat, y)), on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val/mbe", torch.mean(yhat - y), on_step=False, on_epoch=True, prog_bar=False, logger=True)
         return loss
 
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
@@ -69,6 +70,7 @@ class IntraHour(LightningModule):
         self.log("test/loss", loss, on_step=False, on_epoch=True, logger=True)
         self.log("test/mae", F.l1_loss(yhat, y), on_step=False, on_epoch=True, logger=True)
         self.log("test/rmse", torch.sqrt(F.mse_loss(yhat, y)), on_step=False, on_epoch=True, logger=True)
+        self.log("test/mbe", torch.mean(yhat - y), on_step=False, on_epoch=True, logger=True)
         return loss
 
     def predict_step(self, batch: Dict[str, torch.Tensor], batch_idx: int, dataloader_idx: int = 0):
