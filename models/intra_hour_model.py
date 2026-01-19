@@ -104,6 +104,7 @@ class intra_hour_model(nn.Module):
         self,
         image_size: int = 448,
         num_frames: int = 30,
+        num_channels: int = 3,
         video_embed_dim: int = 1024,
         output_channels: int = 2,  # Will be inferred from data
         hidden_dim: int = 256,
@@ -127,8 +128,7 @@ class intra_hour_model(nn.Module):
         self.output_channels = output_channels
         self.hidden_dim = hidden_dim
         self.image_size = image_size
-
-        self.simvp = SimVP_Model([num_frames, 3, image_size, image_size])
+        self.simvp = SimVP_Model([num_frames, num_channels, image_size, image_size])
         self.temporal_conv_pool = TemporalConvPool(16, hidden_dim)
         
         # Irradiance feature processing
