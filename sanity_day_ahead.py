@@ -29,45 +29,61 @@ def _mbe(a, b):
 
 def run_forecast(target, horizon, root_dir="/mnt/nfs/yuan/Folsom", write_hdf: bool = False):
     with contextlib.redirect_stdout(io.StringIO()):
-        train_ds = FolsomDayAheadDataset(root_dir=root_dir, split="train", target=target, horizon=horizon)
-        test_ds = FolsomDayAheadDataset(root_dir=root_dir, split="test", target=target, horizon=horizon)
+        train_ds = FolsomDayAheadDataset(
+            root_dir=root_dir,
+            split="train",
+            target=target,
+            horizon=horizon,
+            feature_return="structured",
+        )
+        test_ds = FolsomDayAheadDataset(
+            root_dir=root_dir,
+            split="test",
+            target=target,
+            horizon=horizon,
+            feature_return="structured",
+        )
 
-    train_batch = next(iter(DataLoader(train_ds, batch_size=len(train_ds), shuffle=False)))
-    test_batch = next(iter(DataLoader(test_ds, batch_size=len(test_ds), shuffle=False)))
+    # Use __getitem__ output (batched) for features/targets; convert to numpy on the sklearn side.
+    train_batch = next(iter(DataLoader(train_ds, batch_size=len(train_ds), shuffle=False, num_workers=0)))
+    test_batch = next(iter(DataLoader(test_ds, batch_size=len(test_ds), shuffle=False, num_workers=0)))
 
-    train_y_kt = train_batch["target"].numpy().flatten()
-    test_y_kt = test_batch["target"].numpy().flatten()
-    train_clear = train_batch["clear_sky"].numpy().flatten()
-    test_clear = test_batch["clear_sky"].numpy().flatten()
-    train_elev = train_batch["elevation"].numpy().flatten()
-    test_elev = test_batch["elevation"].numpy().flatten()
+    train_y_kt = train_batch["target"].numpy().reshape(-1)
+    test_y_kt = test_batch["target"].numpy().reshape(-1)
+    train_clear = train_batch["clear_sky"].numpy().reshape(-1)
+    test_clear = test_batch["clear_sky"].numpy().reshape(-1)
+    train_elev = train_batch["elevation"].numpy().reshape(-1)
+    test_elev = test_batch["elevation"].numpy().reshape(-1)
 
-    # Ground-truth irradiance (match official column: f"{target}_{horizon}")
+    # Ground-truth irradiance + NAM baseline from __getitem__ output (dataset self-contained)
     ycol = f"{target}_{horizon}"
-    ccol = f"{target}_clear_{horizon}"
-    ktcol = f"{target}_kt_{horizon}"
-    namcol = f"nam_{target}_{horizon}"
+    train_y = train_batch["actual"].numpy().reshape(-1)
+    test_y = test_batch["actual"].numpy().reshape(-1)
+    train_nam = train_batch["nam_irr"].numpy().reshape(-1)
+    test_nam = test_batch["nam_irr"].numpy().reshape(-1)
 
-    train_y = np.array([train_ds.data.iloc[i][ycol] for i in train_ds.indices], dtype=float)
-    test_y = np.array([test_ds.data.iloc[i][ycol] for i in test_ds.indices], dtype=float)
-    train_nam = np.array([train_ds.data.iloc[i][namcol] for i in train_ds.indices], dtype=float)
-    test_nam = np.array([test_ds.data.iloc[i][namcol] for i in test_ds.indices], dtype=float)
+    # Structured feature blocks from __getitem__ (batched)
+    train_f = train_batch["features"]
+    test_f = test_batch["features"]
+    train_endo = train_f["endo"].numpy()
+    test_endo = test_f["endo"].numpy()
 
-    # Feature blocks
-    train_X_endo = np.array([train_ds.get_endo_features_only(i).numpy() for i in range(len(train_ds))])
-    test_X_endo = np.array([test_ds.get_endo_features_only(i).numpy() for i in range(len(test_ds))])
-    train_cc = np.array([train_ds.data.iloc[i][f"nam_cc_{horizon}"] for i in train_ds.indices], dtype=float).reshape(-1, 1)
-    test_cc = np.array([test_ds.data.iloc[i][f"nam_cc_{horizon}"] for i in test_ds.indices], dtype=float).reshape(-1, 1)
-    train_nam_feat = train_nam.reshape(-1, 1)
-    test_nam_feat = test_nam.reshape(-1, 1)
+    train_cc = train_f["nam_cc"].numpy()
+    test_cc = test_f["nam_cc"].numpy()
+
+    train_nam_feat = train_f["nam"].numpy().reshape(len(train_ds), -1)
+    test_nam_feat = test_f["nam"].numpy().reshape(len(test_ds), -1)
 
     X_sets = {
-        "endo": (train_X_endo, test_X_endo),
-        "exo": (np.concatenate([train_X_endo, train_cc], axis=1), np.concatenate([test_X_endo, test_cc], axis=1)),
-        "endo+NAM": (np.concatenate([train_X_endo, train_nam_feat], axis=1), np.concatenate([test_X_endo, test_nam_feat], axis=1)),
+        "endo": (train_endo, test_endo),
+        "exo": (np.concatenate([train_endo, train_cc], axis=1), np.concatenate([test_endo, test_cc], axis=1)),
+        "endo+NAM": (
+            np.concatenate([train_endo, train_nam_feat], axis=1),
+            np.concatenate([test_endo, test_nam_feat], axis=1),
+        ),
         "exo+NAM": (
-            np.concatenate([train_X_endo, train_cc, train_nam_feat], axis=1),
-            np.concatenate([test_X_endo, test_cc, test_nam_feat], axis=1),
+            np.concatenate([train_endo, train_cc, train_nam_feat], axis=1),
+            np.concatenate([test_endo, test_cc, test_nam_feat], axis=1),
         ),
     }
 
@@ -78,10 +94,12 @@ def run_forecast(target, horizon, root_dir="/mnt/nfs/yuan/Folsom", write_hdf: bo
     }
 
     # Build forecast table like official script (keeps Train/Test rows)
-    train_idx = train_ds.data.index[train_ds.indices]
-    test_idx = test_ds.data.index[test_ds.indices]
+    train_idx = train_batch["timestamp"]
+    test_idx = test_batch["timestamp"]
     train = pd.DataFrame(index=train_idx)
     test = pd.DataFrame(index=test_idx)
+    ccol = f"{target}_clear_{horizon}"
+    ktcol = f"{target}_kt_{horizon}"
     train[ycol], train[ktcol], train[ccol] = train_y, train_y_kt, train_clear
     test[ycol], test[ktcol], test[ccol] = test_y, test_y_kt, test_clear
 

@@ -8,8 +8,9 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import WandbLogger
 
 sys.path.append(str(Path(__file__).parent.parent))
-from datasets.lightning import FolsomDataModule
-from models.pvinsight import PVFormer
+from datasets.folsom_intra_hour import FolsomDataModule
+from models.pvinsight import IntraHour
+from training.callbacks import WandbImageSanityCallback, WandbGradNormCallback
 
 
 if __name__ == "__main__":
@@ -20,18 +21,20 @@ if __name__ == "__main__":
         "root_dir": "/mnt/nfs/yuan/Folsom",
         "train_sample_num": 100000,
         "val_sample_num": 100000,
-        "batch_size": 4,
+        "batch_size": 16,
         "num_workers": 16,
         "image_size": image_size,
         "use_cache": True,
         "cache_dir": None,
     }
     model_config = {
-        "class_path": "models.pvinsight.PVFormer",
+        "class_path": "models.pvinsight.IntraHour",
         "image_size": image_size,
         "num_frames": 30,
+        "video_embed_dim": 1024,
         "output_channels": 2,
         "hidden_dim": 256,
+        "dropout": 0.1,
     }
     training_config = {
         "learning_rate": 3e-4,
@@ -67,7 +70,7 @@ if __name__ == "__main__":
         "entity": None,
     }
     experiment_config = {
-        "run_name": "pvformer_intra_hour",
+        "run_name": "pvformer_v2_intra_hour",
     }
 
     config = {
@@ -85,12 +88,12 @@ if __name__ == "__main__":
     datamodule = FolsomDataModule(**config["data"])
         
     model_kwargs = {
-        **config["model"],
+        **{k: v for k, v in config["model"].items() if k != "class_path"},
         "learning_rate": config["training"]["learning_rate"],
         "weight_decay": config["training"]["weight_decay"],
         "loss_beta": config["training"]["loss_beta"],
     }
-    model = PVFormer(**model_kwargs)
+    model = IntraHour(**model_kwargs)
     
     timestamp = dt.now().strftime("%B-%d-%Y-%I-%M-%S-%p")
     run_name = config["experiment"]["run_name"]
@@ -122,6 +125,10 @@ if __name__ == "__main__":
     )
     
     callbacks = [checkpoint_callback, early_stopping]
+    callbacks += [
+        WandbImageSanityCallback(),
+        WandbGradNormCallback(),
+    ]
     
     logger = WandbLogger(
         project=config["wandb"]["project"],

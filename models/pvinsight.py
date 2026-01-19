@@ -7,10 +7,10 @@ import torch.nn.functional as F
 
 from .intra_hour_model import intra_hour_model
 
-class PVFormer(LightningModule):
+class IntraHour(LightningModule):
     def __init__(
         self,
-        image_size: int = 448,
+        image_size: int = 224,
         num_frames: int = 30,
         video_embed_dim: int = 1024,
         output_channels: int = 2,

@@ -10,7 +10,7 @@ from rich.table import Table
 
 sys.path.append(str(Path(__file__).parent.parent))
 import yaml
-from datasets.lightning import FolsomDataModule
+from datasets.folsom_intra_hour import FolsomDataModule
 from evaluation.evaluation import Evaluation
 
 
