@@ -30,7 +30,7 @@ def main():
     # test_dataset = FolsomIntraDayDataset(root_dir=root_dir, split="test", sample_num=5000)
     
     # Create data loaders
-    batch_size = 8
+    batch_size = 64
     num_workers = 32
     
     train_loader = DataLoader(
@@ -74,7 +74,7 @@ def main():
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     print(f"Checkpoints will be saved to: {checkpoint_dir}")
     
-    num_epochs = 10
+    num_epochs = 200
     global_step = 0
     for epoch in range(num_epochs):
         model.train()
