@@ -163,7 +163,7 @@ class Evaluation:
                     f"expected {len(test)} samples from test dataset"
                 )
             
-            y_pred_all = result[:, t_idx]
+            y_pred_all = np.clip(result[:, t_idx], 0.0, 1.0) if eval_type == "intra-day" else result[:, t_idx]
             y_pred_all = y_pred_all * clear_all
             y_pred_all[elev_all < 5] = np.nan
             

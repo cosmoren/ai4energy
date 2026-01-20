@@ -1,4 +1,5 @@
 import os
+import numpy as np
 from pathlib import Path
 from torch.utils.data import Dataset
 from typing import Literal, Optional
@@ -25,7 +26,8 @@ class FolsomIntraDayDataset(Dataset):
         split: Literal["train", "test"] = "train",
         image_extensions: tuple = (".jpg", ".jpeg", ".png"),
         sample_num: Optional[int] = None,
-        image_size: int = 10
+        image_size: int = 10,
+        image_his_len = 3,
     ):
         """
         Initialize the Folsom dataset.
@@ -40,6 +42,7 @@ class FolsomIntraDayDataset(Dataset):
         self.image_extensions = image_extensions
         self.image_paths = []
         self.image_size = image_size
+        self.image_his_len = image_his_len
         
         # Determine which years to load based on split
         if split == "train":
@@ -109,7 +112,7 @@ class FolsomIntraDayDataset(Dataset):
         self.sat_df = sat_df
    
         # Get available keys (intersection of irradiance and target dicts)
-        available_keys = list(set(self.irradiance_dict.keys()) & set(self.target_dict.keys()))
+        available_keys = sorted(set(self.irradiance_dict.keys()) & set(self.target_dict.keys()))
         # Select keys: if sample_num is None, use all available; otherwise sample N
         if sample_num is None:
             self.selected_keys = available_keys
@@ -138,25 +141,30 @@ class FolsomIntraDayDataset(Dataset):
                 if any(pd.isna(v) for v in tgt.values()):
                     continue
 
-                # ---------- satellite (12 frames required) ----------
+                # ---------- satellite (his_len frames required) ----------
                 t_issue = pd.Timestamp(datetime.strptime(ts, "%Y%m%d_%H%M%S"))
                 pos = sat_times.searchsorted(
                     t_issue.to_datetime64(),
                     side="right"
                 ) - 1
 
-                # need 12 frames
-                if pos < 11:
+                # need his_len frames
+                if pos < self.image_his_len - 1:
+                    continue
+
+                # check spacing
+                window_times = sat_times[pos - (self.image_his_len - 1) : pos + 1]  # length = image_his_len
+                deltas = np.diff(window_times) / np.timedelta64(1, "m")
+                if not np.all(deltas <= 30):
                     continue
 
                 valid_keys.append(ts)
 
             print(
                 f"[Train] filtered {len(self.selected_keys)} -> {len(valid_keys)} samples "
-                f"(require full 12-frame satellite window)"
+                f"(require full his_len frame satellite window)"
             )
-            self.selected_keys = valid_keys
-        
+            self.selected_keys = valid_keys        
     
     def __len__(self):
         return len(self.selected_keys)
@@ -171,15 +179,15 @@ class FolsomIntraDayDataset(Dataset):
             datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
         )
         
-        # 2. make satellite image window（12 frames）
+        # 2. make satellite image window（his_len frames）
         sat_times = self.sat_df["timestamp"].values  # np.datetime64 array
 
         # find last position where <= t_issue holds（this is the current frame）
         pos = sat_times.searchsorted(t_issue.to_datetime64(), side="right") - 1
         #print("timestamp_str ", timestamp_str, " sat_times at pos ", sat_times[pos])
-        # init window: [12, 1, 10, 10]，all NaN
+        # init window: [his_len, 1, 10, 10]，all NaN
         sat_window = torch.full(
-            (12, 1, 10, 10),
+            (self.image_his_len, 1, 10, 10),
             float("nan"),
             dtype=torch.float32,
         )
@@ -189,9 +197,9 @@ class FolsomIntraDayDataset(Dataset):
             # keep the whole window NaN
             pass
         else:
-            # fill from (pos-11) to pos
-            for i in range(12):
-                sat_idx = pos - (11 - i)   # i=11 -> pos（current）
+            # fill from (pos-(his_len-1)) to pos
+            for i in range(self.image_his_len):
+                sat_idx = pos - (self.image_his_len - 1 - i)   # i=his_len -> pos（current）
                 if sat_idx < 0:
                     continue
                 if sat_idx >= len(self.sat_df):
@@ -237,7 +245,7 @@ class FolsomIntraDayDataset(Dataset):
         return {
             "timestamp": timestamp_str,
             "irradiance": irradiance_tensor,   # [6, 6]
-            "images": sat_window,            # [12, 1, 10, 10]
+            "images": sat_window,            # [his_len, 1, 10, 10]
             "target": target_tensor,            # [2, 6]
         }
 

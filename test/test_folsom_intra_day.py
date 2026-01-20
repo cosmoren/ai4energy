@@ -29,12 +29,12 @@ test_loader = DataLoader(
 
 model = intra_day_model(
     image_size=10,
-    num_frames=1,
+    num_frames=3,
     num_channels=1,
 ).to(device)
 
 ckpt_path = Path(
-    "/mnt/nfs/slurm/home/weize2/folsom/ai4energy/checkpoints/folsom_intra_day_training/checkpoint_epoch_199.pth"
+    "/mnt/nfs/slurm/home/weize2/folsom/ai4energy/checkpoints/folsom_intra_day_training/checkpoint_epoch_25.pth"
 )
 
 ckpt = torch.load(ckpt_path, map_location=device)
@@ -47,7 +47,7 @@ all_timestamps = []
 
 with torch.no_grad():
     for batch in test_loader:
-        images = batch["images"].to(device)         # [B, 1, 1, 10, 10]
+        images = batch["images"].to(device)         # [B, 3, 1, 10, 10]
         irradiance = batch["irradiance"].to(device) # [B, 6, 6]
         timestamps = batch["timestamp"]
 
@@ -66,16 +66,19 @@ evaluator = Evaluation()
 df_ghi = evaluator.eval(
     eval_type="intra-day",
     target="ghi",
-    model_name="my_intra_day_model",
+    model_name="intra_day_20",
     result=pred_tensor[:, 0, :], # shape [N, 6]
 )
 df_dni = evaluator.eval(
     eval_type="intra-day",
     target="dni",
-    model_name="my_intra_day_model",
+    model_name="intra_day_20",
     result=pred_tensor[:, 1, :], # shape [N, 6]
 )
 print("**** GHI ****")
 print(df_ghi)
 print("**** DNI ****")
 print(df_dni)
+#df_ghi.to_csv("/mnt/nfs/slurm/home/weize2/folsom/ai4energy/ghi_intra_day_ckpt20.csv")
+#df_dni.to_csv("/mnt/nfs/slurm/home/weize2/folsom/ai4energy/dni_intra_day_ckpt20.csv")
+#breakpoint()

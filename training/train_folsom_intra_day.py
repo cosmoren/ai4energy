@@ -8,7 +8,7 @@ import sys
 # Add parent directory to path to import datasets
 sys.path.append(str(Path(__file__).parent.parent))
 from datasets.folsom_intra_day import FolsomIntraDayDataset
-from models import intra_hour_model as intra_day_model
+from models.intra_day_model import intra_day_model
 
 
 def main():
@@ -59,7 +59,7 @@ def main():
     
     model = intra_day_model(
         image_size = 10,
-        num_frames = 12,
+        num_frames = 3,
         num_channels = 1,
     ).to(device)
     criterion = torch.nn.SmoothL1Loss(beta=0.05, reduction="mean")
@@ -74,7 +74,7 @@ def main():
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     print(f"Checkpoints will be saved to: {checkpoint_dir}")
     
-    num_epochs = 200
+    num_epochs = 400
     global_step = 0
     for epoch in range(num_epochs):
         model.train()
@@ -103,7 +103,8 @@ def main():
             writer.add_scalar('Loss/Train', loss.item(), global_step)
             global_step += 1
 
-            print('loss: ', epoch, batch_idx, loss.item())
+            if global_step % 50 == 0:
+                print('loss: ', epoch, batch_idx, loss.item())
         
         # Save checkpoint at the end of each epoch
         checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch+1}.pth"
