@@ -341,7 +341,7 @@ if __name__ == "__main__":
         dni: dict[str, float]
 
     experiments = [
-        ModelEvaluation(checkpoint_path="/mnt/nfs/slurm/home/mohammed2/with_yuan/ai4energy/runs/day_ahead_mlp/January-20-2026-04-28-22-PM/epoch_100-val_loss_0.1021.ckpt"),
+        ModelEvaluation(checkpoint_path=""),
         BaselineMetrics(name="regression_baseline", ghi={"RMSE": 74.0, "MAE": 50.2, "MBE": 1.5, "Skill_vs_NAM": 0.338}, dni={"RMSE": 185.0, "MAE": 136.4, "MBE": 11.6, "Skill_vs_NAM": 0.228}),
     ]
     # Optional overrides (None means use what was saved in config.yaml)

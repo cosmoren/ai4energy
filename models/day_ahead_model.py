@@ -8,118 +8,19 @@ from pytorch_lightning import LightningModule
 Features = Union[torch.Tensor, Dict[str, torch.Tensor]]
 
 
-class DayAheadMLP(nn.Module):
+class DayAhead(LightningModule):
     """
-    Simple MLP for day-ahead forecasting.
+    Single LightningModule for day-ahead forecasting (network + training loop).
 
     Expected dataset target is clear-sky index kt.
 
-    Inputs:
-      - features (flat): torch.Tensor [B, D]
-      - features (structured): dict with
-          - endo:   [B, D_endo]
-          - nam_cc: [B, H]
-          - nam:    [B, T, H]
+    Inputs (structured):
+      - endo:   [B, D_endo]
+      - nam_cc: [B, H]
+      - nam:    [B, T, H]
 
     Output:
       - kt prediction with shape [B, T, H] ALWAYS
-    """
-
-    def __init__(
-        self,
-        num_targets: int = 2,
-        num_horizons: int = 14,
-        endo_dim: int = 0,
-        hidden_dim: int = 256,
-        depth: int = 2,
-        dropout: float = 0.1,
-        kt_max: float = 1.2,
-    ):
-        super().__init__()
-        if depth < 1:
-            raise ValueError("depth must be >= 1")
-        if endo_dim <= 0:
-            raise ValueError("endo_dim must be > 0")
-
-        self.num_targets = num_targets
-        self.num_horizons = num_horizons
-        self.kt_max = kt_max
-
-        # Separate encoders for each feature group
-        enc_dim = hidden_dim
-        cc_dim = max(32, hidden_dim // 4)
-        nam_dim = max(32, hidden_dim // 4)
-
-        self.endo_enc = nn.Sequential(
-            nn.Linear(endo_dim, enc_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-        )
-        self.cc_enc = nn.Sequential(
-            nn.Linear(num_horizons, cc_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-        )
-        # Encode NAM per target: [B, T, H] -> [B, T, nam_dim] then pool over targets
-        self.nam_enc = nn.Sequential(
-            nn.Linear(num_horizons, nam_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-        )
-
-        fused_dim = enc_dim + cc_dim + nam_dim
-        blocks = []
-        for _ in range(depth - 1):
-            blocks.extend([nn.Linear(fused_dim, fused_dim), nn.GELU(), nn.Dropout(dropout)])
-        self.backbone = nn.Sequential(*blocks) if blocks else nn.Identity()
-        self.head = nn.Sequential(
-            nn.Linear(fused_dim, fused_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(fused_dim, num_targets * num_horizons),
-        )
-
-    def _flatten_features(self, features: Features) -> torch.Tensor:
-        if isinstance(features, dict):
-            endo = features["endo"]
-            nam_cc = features["nam_cc"]
-            nam = features["nam"]
-            if nam.dim() == 3:
-                nam = nam.flatten(1)  # [B, T*H]
-            return torch.cat([endo, nam_cc, nam], dim=1)
-        return features
-
-    def forward(self, features: Features) -> torch.Tensor:
-        if isinstance(features, dict):
-            endo = features["endo"]  # [B, D_endo]
-            nam_cc = features["nam_cc"]  # [B, H]
-            nam = features["nam"]  # [B, T, H]
-
-            z_endo = self.endo_enc(endo)
-            z_cc = self.cc_enc(nam_cc)
-
-            # [B, T, H] -> [B*T, H] -> [B*T, nam_dim] -> [B, T, nam_dim] -> pool over targets
-            B = nam.shape[0]
-            z_nam = self.nam_enc(nam.reshape(B * self.num_targets, self.num_horizons))
-            z_nam = z_nam.view(B, self.num_targets, -1).mean(dim=1)
-
-            z = torch.cat([z_endo, z_cc, z_nam], dim=1)
-        else:
-            raise ValueError(
-                "DayAheadMLP expects structured features dict with keys {'endo','nam_cc','nam'}. "
-                "Your dataset batch should contain keys 'endo', 'nam_cc', 'nam' (or you passed flat_features). "
-                "If you're seeing this due to cached datasets, clear the dataset cache."
-            )
-        z = self.backbone(z)
-        out = self.head(z)
-        out = out.view(out.shape[0], self.num_targets, self.num_horizons)
-        out = torch.sigmoid(out) * self.kt_max
-        return out
-
-
-class DayAhead(LightningModule):
-    """
-    Minimal LightningModule wrapper for DayAheadMLP.
     """
 
     def __init__(
@@ -142,15 +43,59 @@ class DayAhead(LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
-        self.model = DayAheadMLP(
-            num_targets=num_targets,
-            num_horizons=num_horizons,
-            endo_dim=endo_dim,
-            hidden_dim=hidden_dim,
-            depth=depth,
-            dropout=dropout,
-            kt_max=kt_max,
+        if depth < 1:
+            raise ValueError("depth must be >= 1")
+        if endo_dim <= 0:
+            raise ValueError("endo_dim must be > 0")
+
+        self.num_targets = num_targets
+        self.num_horizons = num_horizons
+        self.kt_max = kt_max
+
+        enc_dim = hidden_dim
+        cc_dim = max(32, hidden_dim // 4)
+        nam_dim = max(32, hidden_dim // 4)
+
+        endo_enc = nn.Sequential(
+            nn.Linear(endo_dim, enc_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
         )
+        cc_enc = nn.Sequential(
+            nn.Linear(num_horizons, cc_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        nam_enc = nn.Sequential(
+            nn.Linear(num_horizons, nam_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+
+        fused_dim = enc_dim + cc_dim + nam_dim
+
+        blocks = []
+        for _ in range(depth - 1):
+            blocks.extend([nn.Linear(fused_dim, fused_dim), nn.GELU(), nn.Dropout(dropout)])
+        backbone = nn.Sequential(*blocks) if blocks else nn.Identity()
+
+        head = nn.Sequential(
+            nn.Linear(fused_dim, fused_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(fused_dim, num_targets * num_horizons),
+        )
+
+        self.model = nn.ModuleDict(
+            {
+                "endo_enc": endo_enc,
+                "cc_enc": cc_enc,
+                "nam_enc": nam_enc,
+                "backbone": backbone,
+                "head": head,
+            }
+        )
+
         self.criterion = nn.SmoothL1Loss(beta=loss_beta, reduction="mean")
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
@@ -160,15 +105,35 @@ class DayAhead(LightningModule):
         self.target_names = list(target_names) if target_names is not None else None
 
     def forward(self, features: Features) -> torch.Tensor:
-        return self.model(features)
+        if not isinstance(features, dict):
+            raise ValueError(
+                "DayAhead expects structured features dict with keys {'endo','nam_cc','nam'}. "
+                "Your batch should contain keys 'endo', 'nam_cc', 'nam'."
+            )
+
+        endo = features["endo"]  # [B, D_endo]
+        nam_cc = features["nam_cc"]  # [B, H]
+        nam = features["nam"]  # [B, T, H]
+
+        z_endo = self.model["endo_enc"](endo)
+        z_cc = self.model["cc_enc"](nam_cc)
+
+        # [B, T, H] -> [B*T, H] -> [B*T, nam_dim] -> [B, T, nam_dim] -> pool over targets
+        B = nam.shape[0]
+        z_nam = self.model["nam_enc"](nam.reshape(B * self.num_targets, self.num_horizons))
+        z_nam = z_nam.view(B, self.num_targets, -1).mean(dim=1)
+
+        z = torch.cat([z_endo, z_cc, z_nam], dim=1)
+        z = self.model["backbone"](z)
+        out = self.model["head"](z)
+        out = out.view(out.shape[0], self.num_targets, self.num_horizons)
+        out = torch.sigmoid(out) * self.kt_max
+        return out
 
     def _features_from_batch(self, batch: Dict[str, torch.Tensor]) -> Features:
         if "endo" in batch and "nam_cc" in batch and "nam" in batch:
             return {"endo": batch["endo"], "nam_cc": batch["nam_cc"], "nam": batch["nam"]}
-        if "flat_features" in batch:
-            # Optional escape hatch: allow passing the flat vector directly.
-            return batch["flat_features"]
-        raise KeyError("Batch must contain ('endo','nam_cc','nam') or 'flat_features'.")
+        raise KeyError("Batch must contain ('endo','nam_cc','nam').")
 
     def _ensure_bth(self, y: torch.Tensor) -> torch.Tensor:
         """

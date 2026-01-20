@@ -1,5 +1,5 @@
 from pathlib import Path
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, ConcatDataset
 from typing import Literal, Optional, Union, List
 import logging
 import pandas as pd
@@ -459,6 +459,65 @@ class FolsomDayAheadDataset(Dataset):
         return torch.tensor(df[cols].values.astype(np.float32), dtype=torch.float32)
 
 
+class StackedDataset(Dataset):
+    """
+    Concatenation of multiple `FolsomDayAheadDataset`s, one per horizon.
+
+    This matches the intent of `dataset_stack.py`, but:
+    - honors the `split` argument
+    - lives in this module so it can be used from the Lightning DataModule
+
+    Notes:
+    - Each sample still has a *single-horizon* tensor shape (H==1), but `sample["horizon"]`
+      tells you which horizon it corresponds to.
+    - `self.horizons` is set to a single representative horizon (length 1) so downstream code
+      that derives `num_horizons = len(dataset.horizons)` keeps working (it will see H==1).
+      The full set is available as `self.stacked_horizons`.
+    """
+
+    def __init__(
+        self,
+        root_dir: str = "/mnt/nfs/yuan/Folsom",
+        split: Literal["train", "test"] = "train",
+        target: Optional[Union[str, List[str]]] = "ghi",
+        horizons: Optional[List[str]] = None,
+        sample_num: Optional[int] = None,
+    ):
+        if horizons is None:
+            horizons = FolsomDayAheadDataset.ALL_HORIZONS.copy()
+        if len(horizons) == 0:
+            raise ValueError("horizons must be a non-empty list")
+
+        self.stacked_horizons = list(horizons)
+        self.datasets = [
+            FolsomDayAheadDataset(
+                root_dir=root_dir,
+                split=split,
+                target=target,
+                horizon=h,
+                sample_num=sample_num,
+            )
+            for h in self.stacked_horizons
+        ]
+        self.data = ConcatDataset(self.datasets)
+
+        # Expose common attrs expected by training code.
+        first = self.datasets[0]
+        self.targets = first.targets
+        self.feature_cols_endo = first.feature_cols_endo
+        self.feature_cols = first.feature_cols
+
+        # Single-horizon shape for downstream dims.
+        self.horizons = [self.stacked_horizons[0]]
+        self.horizon = self.horizons[0]
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+
 def _to_hashable(x):
     if x is None:
         return None
@@ -473,10 +532,11 @@ def get_cache_key(
     sample_num: Optional[int],
     target: Optional[Union[str, List[str]]],
     horizon: Optional[Union[str, List[str]]],
+    stack_horizons: bool,
 ) -> str:
     """Generate a cache key based on dataset parameters."""
     key_string = (
-        f"{root_dir}_{split}_{sample_num}_{_to_hashable(target)}_{_to_hashable(horizon)}"
+        f"{root_dir}_{split}_{sample_num}_{_to_hashable(target)}_{_to_hashable(horizon)}_{stack_horizons}"
     )
     return hashlib.md5(key_string.encode()).hexdigest()
 
@@ -491,6 +551,7 @@ class FolsomDayAheadDataModule(LightningDataModule):
         root_dir: str = "/mnt/nfs/yuan/Folsom",
         target: Optional[Union[str, List[str]]] = "ghi",
         horizon: Optional[Union[str, List[str]]] = "26h",
+        stack_horizons: bool = False,
         train_sample_num: Optional[int] = None,
         val_sample_num: Optional[int] = None,
         test_sample_num: Optional[int] = None,
@@ -508,6 +569,7 @@ class FolsomDayAheadDataModule(LightningDataModule):
         self.root_dir = root_dir
         self.target = target
         self.horizon = horizon
+        self.stack_horizons = stack_horizons
         self.train_sample_num = train_sample_num
         self.val_sample_num = val_sample_num
         self.test_sample_num = test_sample_num
@@ -545,7 +607,7 @@ class FolsomDayAheadDataModule(LightningDataModule):
                 sample_num=self.test_sample_num,
             )
 
-    def _load_or_create_dataset(self, split: str, sample_num: Optional[int]) -> "FolsomDayAheadDataset":
+    def _load_or_create_dataset(self, split: str, sample_num: Optional[int]) -> Dataset:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         cache_key = get_cache_key(
@@ -554,6 +616,7 @@ class FolsomDayAheadDataModule(LightningDataModule):
             sample_num=sample_num,
             target=self.target,
             horizon=self.horizon,
+            stack_horizons=self.stack_horizons,
         )
         cache_file = self.cache_dir / f"dataset_{split}_{cache_key}.pkl"
 
@@ -562,13 +625,28 @@ class FolsomDayAheadDataModule(LightningDataModule):
                 dataset = pickle.load(f)
             return dataset
 
-        dataset = FolsomDayAheadDataset(
-            root_dir=self.root_dir,
-            split=split,
-            target=self.target,
-            horizon=self.horizon,
-            sample_num=sample_num,
-        )
+        if self.stack_horizons:
+            if self.horizon is None:
+                horizons = FolsomDayAheadDataset.ALL_HORIZONS.copy()
+            elif isinstance(self.horizon, list):
+                horizons = self.horizon
+            else:
+                horizons = [self.horizon]
+            dataset = StackedDataset(
+                root_dir=self.root_dir,
+                split=split,
+                target=self.target,
+                horizons=horizons,
+                sample_num=sample_num,
+            )
+        else:
+            dataset = FolsomDayAheadDataset(
+                root_dir=self.root_dir,
+                split=split,
+                target=self.target,
+                horizon=self.horizon,
+                sample_num=sample_num,
+            )
 
         if self.use_cache:
             with open(cache_file, "wb") as f:
