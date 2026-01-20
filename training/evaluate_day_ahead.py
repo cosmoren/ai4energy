@@ -196,7 +196,6 @@ def run_evaluation(
     if horizon is not None:
         data_cfg["horizon"] = horizon
 
-    data_cfg["feature_return"] = "structured"
     data_cfg["batch_size"] = batch_size
     data_cfg["num_workers"] = num_workers
     data_cfg["drop_last"] = False
@@ -342,7 +341,7 @@ if __name__ == "__main__":
         dni: dict[str, float]
 
     experiments = [
-        ModelEvaluation(checkpoint_path="/mnt/nfs/slurm/home/mohammed2/with_yuan/ai4energy/runs/day_ahead_mlp/January-19-2026-11-31-40-PM/epoch_100-val_loss_0.1021.ckpt"),
+        ModelEvaluation(checkpoint_path="/mnt/nfs/slurm/home/mohammed2/with_yuan/ai4energy/runs/day_ahead_mlp/January-20-2026-04-28-22-PM/epoch_100-val_loss_0.1021.ckpt"),
         BaselineMetrics(name="regression_baseline", ghi={"RMSE": 74.0, "MAE": 50.2, "MBE": 1.5, "Skill_vs_NAM": 0.338}, dni={"RMSE": 185.0, "MAE": 136.4, "MBE": 11.6, "Skill_vs_NAM": 0.228}),
     ]
     # Optional overrides (None means use what was saved in config.yaml)

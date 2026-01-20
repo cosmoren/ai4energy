@@ -1,6 +1,7 @@
 from pathlib import Path
 from torch.utils.data import Dataset
 from typing import Literal, Optional, Union, List
+import logging
 import pandas as pd
 import random
 import torch
@@ -9,6 +10,10 @@ import pickle
 import hashlib
 from torch.utils.data import DataLoader
 from pytorch_lightning import LightningDataModule
+
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 
 class FolsomDayAheadDataset(Dataset):
@@ -47,7 +52,6 @@ class FolsomDayAheadDataset(Dataset):
         target: Optional[Union[str, List[str]]] = "ghi",
         horizon: Optional[Union[str, List[str]]] = "26h",
         sample_num: Optional[int] = None,
-        feature_return: Literal["flat", "structured"] = "flat",
     ):
         """
         Initialize the Folsom day-ahead dataset.
@@ -64,12 +68,9 @@ class FolsomDayAheadDataset(Dataset):
                 - List of strings: ["26h", "27h"], etc.
                 - None: uses all 14 horizons
             sample_num: Number of samples to randomly sample for training (None = use all)
-            feature_return: "flat" returns a single stacked feature vector (backward compatible).
-                           "structured" returns a dict with keys: endo, nam_cc, nam.
         """
         self.root_dir = Path(root_dir)
         self.split = split
-        self.feature_return = feature_return
         
         # Normalize target(s)
         if target is None:
@@ -115,7 +116,7 @@ class FolsomDayAheadDataset(Dataset):
         if not irradiance_csv_path.exists():
             raise FileNotFoundError(f"Irradiance features file not found: {irradiance_csv_path}")
         
-        print(f"Loading irradiance features from {irradiance_csv_path}...")
+        logger.debug("Loading irradiance features from %s...", irradiance_csv_path)
         inpEndo = pd.read_csv(irradiance_csv_path, delimiter=",", parse_dates=True, index_col=0)
         
         # Load NAM weather model features CSV (exogenous features)
@@ -123,7 +124,7 @@ class FolsomDayAheadDataset(Dataset):
         if not nam_csv_path.exists():
             raise FileNotFoundError(f"NAM features file not found: {nam_csv_path}")
         
-        print(f"Loading NAM features from {nam_csv_path}...")
+        logger.debug("Loading NAM features from %s...", nam_csv_path)
         inpExo = pd.read_csv(nam_csv_path, delimiter=",", parse_dates=True, index_col=0)
         
         # Load target CSV
@@ -131,7 +132,7 @@ class FolsomDayAheadDataset(Dataset):
         if not target_csv_path.exists():
             raise FileNotFoundError(f"Target file not found: {target_csv_path}")
         
-        print(f"Loading target data from {target_csv_path}...")
+        logger.debug("Loading target data from %s...", target_csv_path)
         tar = pd.read_csv(target_csv_path, delimiter=",", parse_dates=True, index_col=0)
         
         # Filter by year and join all dataframes (matching official code exactly)
@@ -198,15 +199,23 @@ class FolsomDayAheadDataset(Dataset):
         if split == "train" and sample_num is not None:
             N = min(sample_num, len(self.indices))
             self.indices = random.sample(self.indices, N)
-            print(f"Train set: Randomly sampled {len(self.indices)} samples from {len(data)} available")
+            logger.debug(
+                "Train set: Randomly sampled %d samples from %d available",
+                len(self.indices),
+                len(data),
+            )
         else:
-            print(f"{split.capitalize()} set: Using all {len(self.indices)} available samples")
+            logger.debug(
+                "%s set: Using all %d available samples",
+                split.capitalize(),
+                len(self.indices),
+            )
         
-        print(f"Dataset configuration:")
-        print(f"  Targets: {self.targets}")
-        print(f"  Horizons: {self.horizons}")
-        print(f"  Endogenous features: {len(self.feature_cols_endo)}")
-        print(f"  Total features: {len(self.feature_cols)}")
+        logger.debug("Dataset configuration:")
+        logger.debug("  Targets: %s", self.targets)
+        logger.debug("  Horizons: %s", self.horizons)
+        logger.debug("  Endogenous features: %d", len(self.feature_cols_endo))
+        logger.debug("  Total features: %d", len(self.feature_cols))
     
     def __len__(self):
         return len(self.indices)
@@ -217,10 +226,14 @@ class FolsomDayAheadDataset(Dataset):
         
         Returns:
             Dictionary with:
-            - 'features': torch.Tensor of shape [num_features] - combined endogenous and exogenous features
+            - 'endo': torch.Tensor [D_endo]
+            - 'nam_cc': torch.Tensor [num_horizons]
+            - 'nam': torch.Tensor [num_targets, num_horizons]
+            - 'flat_features': torch.Tensor [D_total] - original stacked ordering (endo + nam_cc + nam)
             - 'target': torch.Tensor of shape [num_targets, num_horizons] - kt values for all target-horizon combinations
             - 'clear_sky': torch.Tensor of shape [num_targets, num_horizons] - clear-sky irradiance values
             - 'elevation': torch.Tensor of shape [num_horizons] - solar elevation angles
+            - 'horizon': str or tuple[str, ...] - forecast horizon(s) used for this dataset sample
             - 'timestamp': str - timestamp string for reference
             
             If single target and single horizon, target and clear_sky are scalars (0-d tensors).
@@ -233,25 +246,27 @@ class FolsomDayAheadDataset(Dataset):
         
         out = {}
 
-        # Extract features
-        if self.feature_return == "flat":
-            # Backward compatible: single stacked vector
-            feature_values = row[self.feature_cols].values.astype(np.float32)
-            out["features"] = torch.tensor(feature_values, dtype=torch.float32)
-        elif self.feature_return == "structured":
-            # Flat dict (no nesting)
-            endo_values = row[self.feature_cols_endo].values.astype(np.float32)
-            out["endo"] = torch.tensor(endo_values, dtype=torch.float32)  # [D_endo]
+        # Always return structured features (plus a flat vector).
+        endo_values = row[self.feature_cols_endo].values.astype(np.float32)
+        endo = torch.tensor(endo_values, dtype=torch.float32)  # [D_endo]
 
-            cc_cols = [f"nam_cc_{h}" for h in self.horizons]
-            nam_cc_values = row[cc_cols].values.astype(np.float32)
-            out["nam_cc"] = torch.tensor(nam_cc_values, dtype=torch.float32)  # [num_horizons]
+        cc_cols = [f"nam_cc_{h}" for h in self.horizons]
+        nam_cc_values = row[cc_cols].values.astype(np.float32)
+        nam_cc = torch.tensor(nam_cc_values, dtype=torch.float32)  # [num_horizons]
 
-            nam_cols = [f"nam_{t}_{h}" for t in self.targets for h in self.horizons]
-            nam_values = row[nam_cols].values.astype(np.float32).reshape(len(self.targets), len(self.horizons))
-            out["nam"] = torch.tensor(nam_values, dtype=torch.float32)  # [num_targets, num_horizons]
-        else:
-            raise ValueError(f"Unknown feature_return: {self.feature_return}")
+        nam_cols = [f"nam_{t}_{h}" for t in self.targets for h in self.horizons]
+        nam_values = row[nam_cols].values.astype(np.float32).reshape(len(self.targets), len(self.horizons))
+        nam = torch.tensor(nam_values, dtype=torch.float32)  # [num_targets, num_horizons]
+
+        # Flat vector with the original stacked ordering.
+        flat_values = row[self.feature_cols].values.astype(np.float32)
+        flat_features = torch.tensor(flat_values, dtype=torch.float32)  # [D_total]
+
+        # Flat dict output (no nested "features").
+        out["endo"] = endo
+        out["nam_cc"] = nam_cc
+        out["nam"] = nam
+        out["flat_features"] = flat_features
         
         # Extract targets (kt values) for all target-horizon combinations
         target_values = []
@@ -307,6 +322,8 @@ class FolsomDayAheadDataset(Dataset):
         timestamp = self.data.index[actual_idx]
         timestamp_str = timestamp.strftime('%Y%m%d_%H%M%S')
 
+        horizon_out = self.horizon if self.horizon is not None else tuple(self.horizons)
+
         # Actual irradiance for all target-horizon combinations
         actual_values = []
         for t in self.targets:
@@ -347,6 +364,7 @@ class FolsomDayAheadDataset(Dataset):
                 "elevation": elevation,  # Solar elevation [num_horizons] or scalar
                 "actual": actual,  # Irradiance [W/m^2] for selected target(s)/horizon(s)
                 "nam_irr": nam_irr,  # NAM irradiance baseline [W/m^2] for selected target(s)/horizon(s)
+                "horizon": horizon_out,
                 "timestamp": timestamp_str,
             }
         )
@@ -455,11 +473,10 @@ def get_cache_key(
     sample_num: Optional[int],
     target: Optional[Union[str, List[str]]],
     horizon: Optional[Union[str, List[str]]],
-    feature_return: str,
 ) -> str:
     """Generate a cache key based on dataset parameters."""
     key_string = (
-        f"{root_dir}_{split}_{sample_num}_{_to_hashable(target)}_{_to_hashable(horizon)}_{feature_return}"
+        f"{root_dir}_{split}_{sample_num}_{_to_hashable(target)}_{_to_hashable(horizon)}"
     )
     return hashlib.md5(key_string.encode()).hexdigest()
 
@@ -474,7 +491,6 @@ class FolsomDayAheadDataModule(LightningDataModule):
         root_dir: str = "/mnt/nfs/yuan/Folsom",
         target: Optional[Union[str, List[str]]] = "ghi",
         horizon: Optional[Union[str, List[str]]] = "26h",
-        feature_return: Literal["flat", "structured"] = "flat",
         train_sample_num: Optional[int] = None,
         val_sample_num: Optional[int] = None,
         test_sample_num: Optional[int] = None,
@@ -492,7 +508,6 @@ class FolsomDayAheadDataModule(LightningDataModule):
         self.root_dir = root_dir
         self.target = target
         self.horizon = horizon
-        self.feature_return = feature_return
         self.train_sample_num = train_sample_num
         self.val_sample_num = val_sample_num
         self.test_sample_num = test_sample_num
@@ -539,7 +554,6 @@ class FolsomDayAheadDataModule(LightningDataModule):
             sample_num=sample_num,
             target=self.target,
             horizon=self.horizon,
-            feature_return=self.feature_return,
         )
         cache_file = self.cache_dir / f"dataset_{split}_{cache_key}.pkl"
 
@@ -554,7 +568,6 @@ class FolsomDayAheadDataModule(LightningDataModule):
             target=self.target,
             horizon=self.horizon,
             sample_num=sample_num,
-            feature_return=self.feature_return,
         )
 
         if self.use_cache:
@@ -604,6 +617,9 @@ class FolsomDayAheadDataModule(LightningDataModule):
 
 
 if __name__ == "__main__":
+    # Enable dataset debug logs only when running this file directly.
+    logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(name)s:%(message)s")
+
     split = "train" # can be "train" or "test"
     target = None # can be "ghi" or "dni" or None for all targets
     horizon = None # can be "26h", "27h", "28h", "29h", "30h", "31h", "32h", "33h", "34h", "35h", "36h", "37h", "38h", "39h" or None for all horizons
@@ -615,10 +631,10 @@ if __name__ == "__main__":
         root_dir / "Target_day-ahead.csv",
     ]
     if not all(p.exists() for p in required):
-        print("SKIP: missing required day-ahead CSVs:")
+        logger.debug("SKIP: missing required day-ahead CSVs:")
         for p in required:
             if not p.exists():
-                print(" -", p)
+                logger.debug(" - %s", p)
         raise SystemExit(0)
 
     ds = FolsomDayAheadDataset(
@@ -627,16 +643,24 @@ if __name__ == "__main__":
         target=target,
         horizon=horizon,
         sample_num=None,
-        feature_return="structured",
     )
-    print("len:", len(ds))
+    logger.debug("len: %d", len(ds))
     sample = ds[0]
-    print("keys:", sorted(sample.keys()))
-    if isinstance(sample["features"], dict):
-        print("features (structured):", {k: tuple(v.shape) for k, v in sample["features"].items()})
-    else:
-        print("features:", tuple(sample["features"].shape))
-    print("target:", tuple(sample["target"].shape) if hasattr(sample["target"], "shape") else type(sample["target"]))
-    print("clear_sky:", tuple(sample["clear_sky"].shape) if hasattr(sample["clear_sky"], "shape") else type(sample["clear_sky"]))
-    print("elevation:", tuple(sample["elevation"].shape) if hasattr(sample["elevation"], "shape") else type(sample["elevation"]))
-    print("timestamp:", sample["timestamp"])
+    logger.debug("keys: %s", sorted(sample.keys()))
+    logger.debug("endo: %s", tuple(sample["endo"].shape))
+    logger.debug("nam_cc: %s", tuple(sample["nam_cc"].shape))
+    logger.debug("nam: %s", tuple(sample["nam"].shape))
+    logger.debug("flat_features: %s", tuple(sample["flat_features"].shape))
+    logger.debug(
+        "target: %s",
+        tuple(sample["target"].shape) if hasattr(sample["target"], "shape") else type(sample["target"]),
+    )
+    logger.debug(
+        "clear_sky: %s",
+        tuple(sample["clear_sky"].shape) if hasattr(sample["clear_sky"], "shape") else type(sample["clear_sky"]),
+    )
+    logger.debug(
+        "elevation: %s",
+        tuple(sample["elevation"].shape) if hasattr(sample["elevation"], "shape") else type(sample["elevation"]),
+    )
+    logger.debug("timestamp: %s", sample["timestamp"])

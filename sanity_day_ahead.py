@@ -34,14 +34,12 @@ def run_forecast(target, horizon, root_dir="/mnt/nfs/yuan/Folsom", write_hdf: bo
             split="train",
             target=target,
             horizon=horizon,
-            feature_return="structured",
         )
         test_ds = FolsomDayAheadDataset(
             root_dir=root_dir,
             split="test",
             target=target,
             horizon=horizon,
-            feature_return="structured",
         )
 
     # Use __getitem__ output (batched) for features/targets; convert to numpy on the sklearn side.

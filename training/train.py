@@ -22,7 +22,6 @@ if __name__ == "__main__":
         # Once you move to masked training (handling missing horizons), you can switch these to None.
         "target": None,   # "ghi" | "dni" | ["ghi","dni"] | None
         "horizon": None,  # "26h" | ... | ["26h","27h"] | None
-        "feature_return": "structured",
         "train_sample_num": None,
         "val_sample_num": None,
         "batch_size": 8,

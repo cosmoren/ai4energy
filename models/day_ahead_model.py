@@ -107,8 +107,8 @@ class DayAheadMLP(nn.Module):
         else:
             raise ValueError(
                 "DayAheadMLP expects structured features dict with keys {'endo','nam_cc','nam'}. "
-                "Your dataset is likely returning flat 'features' (possibly from an old cache). "
-                "Set feature_return='structured' and/or clear the dataset cache."
+                "Your dataset batch should contain keys 'endo', 'nam_cc', 'nam' (or you passed flat_features). "
+                "If you're seeing this due to cached datasets, clear the dataset cache."
             )
         z = self.backbone(z)
         out = self.head(z)
@@ -163,11 +163,12 @@ class DayAhead(LightningModule):
         return self.model(features)
 
     def _features_from_batch(self, batch: Dict[str, torch.Tensor]) -> Features:
-        if "features" in batch:
-            return batch["features"]
         if "endo" in batch and "nam_cc" in batch and "nam" in batch:
             return {"endo": batch["endo"], "nam_cc": batch["nam_cc"], "nam": batch["nam"]}
-        raise KeyError("Batch must contain either 'features' or ('endo','nam_cc','nam').")
+        if "flat_features" in batch:
+            # Optional escape hatch: allow passing the flat vector directly.
+            return batch["flat_features"]
+        raise KeyError("Batch must contain ('endo','nam_cc','nam') or 'flat_features'.")
 
     def _ensure_bth(self, y: torch.Tensor) -> torch.Tensor:
         """
