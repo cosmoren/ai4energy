@@ -30,11 +30,11 @@ test_loader = DataLoader(
 model = intra_day_model(
     image_size=10,
     num_frames=3,
-    num_channels=1,
+    num_channels=2,
 ).to(device)
 
 ckpt_path = Path(
-    "/mnt/nfs/slurm/home/weize2/folsom/ai4energy/checkpoints/folsom_intra_day_training/checkpoint_epoch_20.pth"
+    "/mnt/nfs/slurm/home/weize2/folsom/ai4energy/checkpoints/folsom_intra_day_training/checkpoint_epoch_7.pth"
 )
 
 ckpt = torch.load(ckpt_path, map_location=device)
@@ -79,6 +79,6 @@ print("**** GHI ****")
 print(df_ghi)
 print("**** DNI ****")
 print(df_dni)
-df_ghi.to_csv("/mnt/nfs/slurm/home/weize2/folsom/ai4energy/ghi_intra_day_ckpt20.csv")
-df_dni.to_csv("/mnt/nfs/slurm/home/weize2/folsom/ai4energy/dni_intra_day_ckpt20.csv")
+#df_ghi.to_csv("/mnt/nfs/slurm/home/weize2/folsom/ai4energy/ghi_intra_day_ckpt20.csv")
+#df_dni.to_csv("/mnt/nfs/slurm/home/weize2/folsom/ai4energy/dni_intra_day_ckpt20.csv")
 #breakpoint()

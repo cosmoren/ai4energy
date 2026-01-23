@@ -54,6 +54,57 @@ class FolsomIntraDayDataset(Dataset):
         else:
             raise ValueError(f"split must be 'train' or 'test', got {split}")
         
+        # load sky image features
+        sky_feat_csv_path = self.root_dir / "Sky_image_features_intra-hour.csv"
+        if sky_feat_csv_path.exists():
+            print(f"Loading sky features from {sky_feat_csv_path}...")
+            self.sky_df = pd.read_csv(sky_feat_csv_path)
+            # Parse timestamp column to datetime
+            self.sky_df['timestamp'] = pd.to_datetime(self.sky_df['timestamp'])
+            # Filter by year based on split
+            self.sky_df = self.sky_df[self.sky_df['timestamp'].dt.year.isin(year_filter)]
+            # Reset index after filtering
+            self.sky_df = self.sky_df.reset_index(drop=True)
+            # Create a mapping from timestamp (same format as Target_intra-day.csv key) to feature dict
+            self.sky_df['timestamp_str'] = self.sky_df['timestamp'].dt.strftime('%Y%m%d_%H%M%S')
+            # Exclude "timestamp" and "timestamp_str" columns from feature dicts
+            feature_columns = [col for col in self.sky_df.columns if col not in ('timestamp', 'timestamp_str')]
+            self.sky_dict = {
+                row['timestamp_str']: {col: row[col] for col in feature_columns}
+                for _, row in self.sky_df.iterrows()
+            }
+            print(f"Loaded {len(self.sky_df)} sky feature records for {split} set (years: {year_filter})")
+        else:
+            print(f"Warning: sky features file {sky_feat_csv_path} not found")
+            self.sky_df = None
+            self.sky_dict = None
+
+        # Load satellite features
+        sat_feat_csv_path = self.root_dir / "Sat_image_features_intra-day.csv"
+        if sat_feat_csv_path.exists():
+            print(f"Loading sat image features from {sat_feat_csv_path}...")
+            sat_feat_df = pd.read_csv(
+                sat_feat_csv_path,
+                parse_dates=True,
+                index_col=0,   # index is timestamp
+            )
+            # filter by year
+            sat_feat_df = sat_feat_df[sat_feat_df.index.year.isin(year_filter)]
+            # make timestamp_str for lookup consistency
+            sat_feat_df["timestamp_str"] = sat_feat_df.index.strftime("%Y%m%d_%H%M%S")
+            feat_cols = sat_feat_df.columns.drop("timestamp_str")
+            self.sat_feat_dict = {
+                row["timestamp_str"]: row[feat_cols].values.astype("float32")
+                for _, row in sat_feat_df.iterrows()
+            }
+            self.sat_feat_dim = len(feat_cols)
+            print(f"Loaded {len(self.sat_feat_dict)} satellite feature records "
+                f"(dim={self.sat_feat_dim})")
+        else:
+            print(f"Warning: {sat_feat_csv_path} not found")
+            self.sat_feat_dict = None
+            self.sat_feat_dim = 0
+
         # Load irradiance features CSV
         irradiance_csv_path = self.root_dir / "Irradiance_features_intra-day.csv"
         if irradiance_csv_path.exists():
@@ -152,12 +203,6 @@ class FolsomIntraDayDataset(Dataset):
                 if pos < self.image_his_len - 1:
                     continue
 
-                # check spacing
-                window_times = sat_times[pos - (self.image_his_len - 1) : pos + 1]  # length = image_his_len
-                deltas = np.diff(window_times) / np.timedelta64(1, "m")
-                if not np.all(deltas <= 30):
-                    continue
-
                 valid_keys.append(ts)
 
             print(
@@ -170,7 +215,7 @@ class FolsomIntraDayDataset(Dataset):
         return len(self.selected_keys)
     
     def __getitem__(self, idx):
-        # 1. time stamp and target
+        # time stamp and target
         timestamp_str = self.selected_keys[idx]
         irradiance_data = self.irradiance_dict[timestamp_str]
         target_data = self.target_dict[timestamp_str]
@@ -179,7 +224,7 @@ class FolsomIntraDayDataset(Dataset):
             datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
         )
         
-        # 2. make satellite image window（his_len frames）
+        # make satellite image window（his_len frames）
         sat_times = self.sat_df["timestamp"].values  # np.datetime64 array
 
         # find last position where <= t_issue holds（this is the current frame）
@@ -209,8 +254,19 @@ class FolsomIntraDayDataset(Dataset):
                 patch = torch.from_numpy(patch).view(1, 10, 10)
 
                 sat_window[i] = patch
-
-        # 3. Irradiance tensor
+        # encode relative times
+        time_delta = torch.empty(self.image_his_len, dtype=torch.float32)
+        for i in range(self.image_his_len):
+            sat_idx = pos - (self.image_his_len - 1 - i)
+            if sat_idx < 0:
+                time_delta[i] = float("nan")
+            else:
+                dt_min = (t_issue.to_datetime64() - sat_times[sat_idx]) / np.timedelta64(1, "m")
+                time_delta[i] = dt_min
+        time_delta = time_delta.view(self.image_his_len, 1, 1, 1).expand(-1, -1, 10, 10) # [his_len, 1, 10, 10]
+        time_delta = 255.0 * torch.exp(-(time_delta) / 90.0) # exp decay, 0->255, inf->0
+        sat_window = torch.cat([sat_window, time_delta], dim = 1) # [his_len, 2, 10, 10]
+        # Irradiance tensor
         irradiance_tensor = torch.tensor(
             [irradiance_data[k] for k in irradiance_data.keys()],
             dtype=torch.float32,
@@ -218,7 +274,7 @@ class FolsomIntraDayDataset(Dataset):
 
         irradiance_tensor = torch.fliplr(irradiance_tensor)  # [6, 6]
 
-        # 4. Target tensor
+        # Target tensor
         target_tensor = torch.tensor(
             [
                 [
@@ -241,11 +297,72 @@ class FolsomIntraDayDataset(Dataset):
             dtype=torch.float32,
         )  # [2, 6]
 
-        # 5. return
+        # clear sky kt
+        clear_tensor = torch.tensor(
+            [
+                [
+                    self.irradiance_dict[timestamp_str]["B(ghi_kt|30min)"],
+                    self.irradiance_dict[timestamp_str]["B(ghi_kt|60min)"],
+                    self.irradiance_dict[timestamp_str]["B(ghi_kt|90min)"],
+                    self.irradiance_dict[timestamp_str]["B(ghi_kt|120min)"],
+                    self.irradiance_dict[timestamp_str]["B(ghi_kt|150min)"],
+                    self.irradiance_dict[timestamp_str]["B(ghi_kt|180min)"],
+                ],
+                [
+                    self.irradiance_dict[timestamp_str]["B(dni_kt|30min)"],
+                    self.irradiance_dict[timestamp_str]["B(dni_kt|60min)"],
+                    self.irradiance_dict[timestamp_str]["B(dni_kt|90min)"],
+                    self.irradiance_dict[timestamp_str]["B(dni_kt|120min)"],
+                    self.irradiance_dict[timestamp_str]["B(dni_kt|150min)"],
+                    self.irradiance_dict[timestamp_str]["B(dni_kt|180min)"],
+                ],
+            ],
+            dtype=torch.float32,
+        )
+        
+        '''
+        self.irradiance_dict[timestamp_str]["B(ghi_kt|30min)"],
+                    self.irradiance_dict[timestamp_str]["V(ghi_kt|30min)"],
+
+                    self.irradiance_dict[timestamp_str]["B(ghi_kt|60min)"],
+                    self.irradiance_dict[timestamp_str]["V(ghi_kt|60min)"],
+
+                    self.irradiance_dict[timestamp_str]["B(ghi_kt|120min)"],
+                    self.irradiance_dict[timestamp_str]["V(ghi_kt|120min)"],
+
+                    self.irradiance_dict[timestamp_str]["B(ghi_kt|180min)"],
+                    self.irradiance_dict[timestamp_str]["L(ghi_kt|180min)"],           
+        '''
+
+        # xgb_input_tensor to replicate paper
+        xgb_input_tensor = torch.tensor(
+            [
+                [
+                    [self.irradiance_dict[timestamp_str]["B(ghi_kt|30min)"], self.irradiance_dict[timestamp_str]["V(ghi_kt|30min)"], self.sky_dict[timestamp_str]['ENT(R)'], self.sky_dict[timestamp_str]['AVG(G)'], self.sky_dict[timestamp_str]['ENT(RB)']],
+                    [self.irradiance_dict[timestamp_str]["B(ghi_kt|60min)"], self.irradiance_dict[timestamp_str]["V(ghi_kt|60min)"], self.sky_dict[timestamp_str]['AVG(R)'], self.sky_dict[timestamp_str]['ENT(G)'], self.sky_dict[timestamp_str]['ENT(RB)']],
+                    [0, 0, 0, 0, 0],
+                    [self.irradiance_dict[timestamp_str]["B(ghi_kt|120min)"], self.irradiance_dict[timestamp_str]["V(ghi_kt|120min)"], self.sky_dict[timestamp_str]['AVG(G)'], self.sky_dict[timestamp_str]['ENT(G)'], self.sky_dict[timestamp_str]['ENT(RB)']],
+                    [0, 0, 0, 0, 0],
+                    [self.irradiance_dict[timestamp_str]["B(ghi_kt|180min)"], self.irradiance_dict[timestamp_str]["L(ghi_kt|180min)"], self.sky_dict[timestamp_str]['AVG(G)'], self.sky_dict[timestamp_str]['ENT(B)'], self.sky_dict[timestamp_str]['ENT(RB)']],
+                ],
+                [
+                    [self.irradiance_dict[timestamp_str]["B(dni_kt|30min)"], self.irradiance_dict[timestamp_str]["V(dni_kt|30min)"], self.sky_dict[timestamp_str]['ENT(R)'], self.sky_dict[timestamp_str]['AVG(G)'], self.sky_dict[timestamp_str]['ENT(RB)']],
+                    [self.irradiance_dict[timestamp_str]["B(dni_kt|60min)"], self.irradiance_dict[timestamp_str]["V(dni_kt|60min)"], self.sky_dict[timestamp_str]['ENT(G)'], self.sky_dict[timestamp_str]['AVG(G)'], self.sky_dict[timestamp_str]['ENT(RB)']],
+                    [0, 0, 0, 0, 0],
+                    [self.irradiance_dict[timestamp_str]["V(dni_kt|120min)"], self.sky_dict[timestamp_str]['ENT(R)'], self.sky_dict[timestamp_str]['AVG(G)'], self.sky_dict[timestamp_str]['AVG(B)'], self.sky_dict[timestamp_str]['ENT(RB)']],
+                    [0, 0, 0, 0, 0],
+                    [self.irradiance_dict[timestamp_str]["V(dni_kt|180min)"], self.irradiance_dict[timestamp_str]["L(dni_kt|180min)"], self.sky_dict[timestamp_str]['AVG(R)'], self.sky_dict[timestamp_str]['ENT(R)'], self.sky_dict[timestamp_str]['ENT(RB)']],
+                ]
+            ]
+        ) # [2, 6, 5] 2 modes(ghi,dni), 6 horizons, 5 inputs
+
+        # return
         return {
             "timestamp": timestamp_str,
             "irradiance": irradiance_tensor,   # [6, 6]
             "images": sat_window,            # [his_len, 1, 10, 10]
+            "clear_kt": clear_tensor,        # [2, 6]
+            "xgb_input": xgb_input_tensor, # [2, 6, 5]
             "target": target_tensor,            # [2, 6]
         }
 

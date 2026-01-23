@@ -9,7 +9,64 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent))
 from datasets.folsom_intra_day import FolsomIntraDayDataset
 from models.intra_day_model import intra_day_model
+from evaluation.evaluation import Evaluation
 
+def evaluate_on_test(model, test_loader, device):
+    model.eval()
+
+    all_preds = []
+    all_timestamps = []
+
+    with torch.no_grad():
+        for batch in test_loader:
+            images = batch["images"].to(device)
+            irradiance = batch["irradiance"].to(device)
+            timestamps = batch["timestamp"]
+
+            outputs = model(
+                images=images,
+                irradiance=irradiance,
+            )  # [B, 2, 6]
+
+            all_preds.append(outputs)
+            all_timestamps.extend(timestamps)
+
+    pred_tensor = torch.cat(all_preds, dim=0)  # [N, 2, 6]
+    pred_tensor = pred_tensor.cpu().numpy()
+
+    evaluator = Evaluation()
+
+    df_ghi = evaluator.eval(
+        eval_type="intra-day",
+        target="ghi",
+        model_name="intra_day",
+        result=pred_tensor[:, 0, :],  # [N, 6]
+    )
+    df_dni = evaluator.eval(
+        eval_type="intra-day",
+        target="dni",
+        model_name="intra_day",
+        result=pred_tensor[:, 1, :],  # [N, 6]
+    )
+
+    return df_ghi, df_dni
+
+def log_eval_to_tensorboard(writer, df, prefix, epoch):
+    # 单 horizon
+    for i, row in df.iterrows():
+        horizon = row["horizon"]
+        writer.add_scalar(
+            f"{prefix}/RMSE_{horizon}",
+            row["intra_day_rmse"],
+            epoch,
+        )
+
+    # 平均 RMSE
+    writer.add_scalar(
+        f"{prefix}/RMSE_mean",
+        df["intra_day_rmse"].mean(),
+        epoch,
+    )
 
 def main():
     """
@@ -41,15 +98,16 @@ def main():
         pin_memory=True if torch.cuda.is_available() else False
     )
     
-    '''
+    print("Creating test dataset...")
+    test_dataset = FolsomIntraDayDataset(root_dir=root_dir, split="test",)
+
     test_loader = DataLoader(
         test_dataset,
-        batch_size=batch_size,
+        batch_size=1,          # evaluation 用 1，和你现在 test 脚本一致
         shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True if torch.cuda.is_available() else False
+        num_workers=4,
+        pin_memory=True if torch.cuda.is_available() else False,
     )
-    '''
     
     print(f"\nDataset sizes:")
     print(f"  Training: {len(train_dataset)} images")
@@ -60,10 +118,10 @@ def main():
     model = intra_day_model(
         image_size = 10,
         num_frames = 3,
-        num_channels = 1,
+        num_channels = 2,
     ).to(device)
     criterion = torch.nn.SmoothL1Loss(beta=0.05, reduction="mean")
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), weight_decay=0.05, eps=1e-8)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, betas=(0.9, 0.95), weight_decay=0.05, eps=1e-8) # lr = 3e-4
     
     # Initialize TensorBoard writer
     log_dir = Path(__file__).parent.parent / "runs" / "folsom_intra_day_training"
@@ -115,7 +173,17 @@ def main():
             'global_step': global_step,
         }, checkpoint_path)
         print(f"Checkpoint saved: {checkpoint_path}")
-    
+
+        # ========== Evaluation on test set ==========
+        df_ghi, df_dni = evaluate_on_test(
+            model=model,
+            test_loader=test_loader,
+            device=device,
+        )
+        log_eval_to_tensorboard(writer, df_ghi, "Test/GHI", epoch)
+        log_eval_to_tensorboard(writer, df_dni, "Test/DNI", epoch)
+        print(f"[Epoch {epoch}] Test evaluation done")
+
     # Save final checkpoint
     final_checkpoint_path = checkpoint_dir / "checkpoint_final.pth"
     torch.save({
