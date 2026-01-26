@@ -7,10 +7,10 @@ import torch.nn.functional as F
 
 from .intra_hour_model import intra_hour_model
 
-class PVFormer(LightningModule):
+class IntraHour(LightningModule):
     def __init__(
         self,
-        image_size: int = 448,
+        image_size: int = 224,
         num_frames: int = 30,
         video_embed_dim: int = 1024,
         output_channels: int = 2,
@@ -57,9 +57,10 @@ class PVFormer(LightningModule):
         yhat = self(batch["images"], batch["irradiance"])
         y = batch["target"]
         loss = self.criterion(yhat, y)
-        self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
         self.log("val/mae", F.l1_loss(yhat, y), on_step=False, on_epoch=True, prog_bar=True, logger=True)
         self.log("val/rmse", torch.sqrt(F.mse_loss(yhat, y)), on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val/mbe", torch.mean(yhat - y), on_step=False, on_epoch=True, prog_bar=False, logger=True)
         return loss
 
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
@@ -69,6 +70,7 @@ class PVFormer(LightningModule):
         self.log("test/loss", loss, on_step=False, on_epoch=True, logger=True)
         self.log("test/mae", F.l1_loss(yhat, y), on_step=False, on_epoch=True, logger=True)
         self.log("test/rmse", torch.sqrt(F.mse_loss(yhat, y)), on_step=False, on_epoch=True, logger=True)
+        self.log("test/mbe", torch.mean(yhat - y), on_step=False, on_epoch=True, logger=True)
         return loss
 
     def predict_step(self, batch: Dict[str, torch.Tensor], batch_idx: int, dataloader_idx: int = 0):

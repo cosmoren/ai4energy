@@ -8,43 +8,49 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import WandbLogger
 
 sys.path.append(str(Path(__file__).parent.parent))
-from datasets.lightning import FolsomDataModule
-from models.pvinsight import PVFormer
+from datasets.folsom_day_ahead import FolsomDayAheadDataModule
+from models.day_ahead_model import DayAhead
+from training.callbacks import WandbImageSanityCallback, WandbGradNormCallback
 
 
 if __name__ == "__main__":
     torch.set_float32_matmul_precision('medium')
 
-    image_size = 224
     data_config = {
         "root_dir": "/mnt/nfs/yuan/Folsom",
-        "train_sample_num": 100000,
-        "val_sample_num": 100000,
-        "batch_size": 4,
+        # day-ahead: start with a single (target, horizon) so the dataset isn't empty after dropna filtering.
+        # Once you move to masked training (handling missing horizons), you can switch these to None.
+        "target": None,   # "ghi" | "dni" | ["ghi","dni"] | None
+        "horizon": None,  # "26h" | ... | ["26h","27h"] | None
+        "train_sample_num": None,
+        "val_sample_num": None,
+        "batch_size": 8,
         "num_workers": 16,
-        "image_size": image_size,
         "use_cache": True,
         "cache_dir": None,
+        "drop_last": False,
     }
     model_config = {
-        "class_path": "models.pvinsight.PVFormer",
-        "image_size": image_size,
-        "num_frames": 30,
-        "output_channels": 2,
+        "class_path": "models.day_ahead_model.DayAhead",
+        "num_targets": 2,
+        "num_horizons": 14,
         "hidden_dim": 256,
+        "depth": 3,
+        "dropout": 0.1,
+        "kt_max": 1.2,
     }
     training_config = {
         "learning_rate": 3e-4,
         "weight_decay": 0.05,
         "loss_beta": 0.05,
-        "num_epochs": 10,
+        "num_epochs": 1000,
         "seed": 42,
         "deterministic": True,
     }
     lightning_config = {
         "accelerator": "gpu",
         "devices": -1,
-        "strategy": "ddp_find_unused_parameters_true",
+        "strategy": "ddp",
         "precision": 32,
         "accumulate_grad_batches": 1,
         "gradient_clip_val": None,
@@ -58,16 +64,16 @@ if __name__ == "__main__":
         "checkpoint_dir": None,  # set after save_dir is created
         "resume_from_checkpoint": None,
         "save_top_k": 3,
-        "monitor": "val/loss",
+        "monitor": "val_irr_rmse_ghi",
         "mode": "min",
     }
     wandb_config = {
         "project": "ai4energy-folsom",
-        "name": "intra_hour_forecasting",
+        "name": "day_ahead_forecasting",
         "entity": None,
     }
     experiment_config = {
-        "run_name": "pvformer_intra_hour",
+        "run_name": "day_ahead_mlp",
     }
 
     config = {
@@ -82,15 +88,37 @@ if __name__ == "__main__":
     
     seed_everything(config["training"]["seed"], workers=True)
     
-    datamodule = FolsomDataModule(**config["data"])
+    datamodule = FolsomDayAheadDataModule(**config["data"])
+    datamodule.setup("fit")
+
+    # Derive dims from the dataset so shapes always match
+    endo_dim = len(datamodule.train_dataset.feature_cols_endo)
+    num_targets = len(datamodule.train_dataset.targets)
+    num_horizons = len(datamodule.train_dataset.horizons)
+    target_names = [str(t) for t in datamodule.train_dataset.targets]
+
+    print("train_dataset len:", len(datamodule.train_dataset))
+    print("val_dataset len:", len(datamodule.val_dataset))
+    print("num_targets:", num_targets, "num_horizons:", num_horizons, "endo_dim:", endo_dim)
+
+    if len(datamodule.train_dataset) == 0:
+        raise RuntimeError(
+            "train_dataset length is 0. If you're using target=None and horizon=None, "
+            "the dataset dropna filtering can become very strict across all targets+horizons. "
+            "Try training with a single target/horizon first, or change the dataset to support masking."
+        )
         
     model_kwargs = {
-        **config["model"],
+        **{k: v for k, v in config["model"].items() if k != "class_path"},
+        "num_targets": num_targets,
+        "num_horizons": num_horizons,
+        "endo_dim": endo_dim,
+        "target_names": target_names,
         "learning_rate": config["training"]["learning_rate"],
         "weight_decay": config["training"]["weight_decay"],
         "loss_beta": config["training"]["loss_beta"],
     }
-    model = PVFormer(**model_kwargs)
+    model = DayAhead(**model_kwargs)
     
     timestamp = dt.now().strftime("%B-%d-%Y-%I-%M-%S-%p")
     run_name = config["experiment"]["run_name"]
@@ -108,7 +136,8 @@ if __name__ == "__main__":
     # Create callbacks
     checkpoint_callback = ModelCheckpoint(
         dirpath=save_dir,
-        filename="epoch_{epoch:02d}-val_loss_{val/loss:.4f}",
+        filename="epoch_{epoch:02d}-val_loss_{val_loss:.4f}",
+        auto_insert_metric_name=False,
         monitor=config["checkpoint"]["monitor"],
         mode=config["checkpoint"]["mode"],
         save_top_k=config["checkpoint"]["save_top_k"],
@@ -118,10 +147,15 @@ if __name__ == "__main__":
     early_stopping = EarlyStopping(
         monitor=config["checkpoint"]["monitor"],
         mode=config["checkpoint"]["mode"],
-        patience=5,
+        patience=100,
     )
     
-    callbacks = [checkpoint_callback, early_stopping]
+    callbacks = [checkpoint_callback]
+    callbacks += [
+        early_stopping,
+        WandbImageSanityCallback(),
+        WandbGradNormCallback(),
+    ]
     
     logger = WandbLogger(
         project=config["wandb"]["project"],
@@ -164,6 +198,13 @@ if __name__ == "__main__":
         ckpt_path=config["checkpoint"]["resume_from_checkpoint"]
     )
     
+    # Final evaluation on the test split (logs to the same WandB run)
+    trainer.test(
+        model=None,
+        datamodule=datamodule,
+        ckpt_path="best",
+    )
+
     print(f"\nTraining completed!")
     print(f"Best model checkpoint: {checkpoint_callback.best_model_path}")
     print(f"Best model score: {checkpoint_callback.best_model_score}")
