@@ -146,6 +146,9 @@ class Evaluation:
             test = inpEndo[inpEndo.index.year == 2016]
             test = test.join(inpExo[inpEndo.index.year == 2016], how="inner")
             test = test.join(tar[tar.index.year == 2016], how="inner")
+            
+            test = test[-result.shape[0]:]
+
             feature_cols_endo = inpEndo.filter(regex=target).columns.tolist()
             feature_cols_exo = feature_cols_endo + inpExo.columns.tolist()
             # Don't dropna here - we'll filter after aligning with predictions
@@ -157,6 +160,8 @@ class Evaluation:
             
             # Prepare model predictions for all samples (before filtering)
             # result shape is [N_test, T_horizons] where N_test should match test dataset size
+            
+
             if result.shape[0] != len(test):
                 raise ValueError(
                     f"Prediction shape mismatch: got {result.shape[0]} predictions, "
@@ -249,9 +254,9 @@ class Evaluation:
         return df
 
 if __name__ == "__main__":
-    data = np.load('../aa.npy', allow_pickle=True).item()
+    data = np.load('../dd.npy', allow_pickle=True).item()
     # test_result = data['predictions_ghi']
-    test_result = data['predictions_dni']
+    test_result = data['predictions_ghi']
     # a demo
     # test_result = np.zeros((48401, 6)) # 48357 non-nan samples in intra-day dataset, 6 horizons.
     # test_result in kt, no units
@@ -260,7 +265,7 @@ if __name__ == "__main__":
     evaluator = Evaluation()
     df = evaluator.eval(
         eval_type="intra-hour",
-        target="dni",
+        target="ghi",
         model_name="SimVPV2",
         result=test_result,   # shape [N, 6]
     )

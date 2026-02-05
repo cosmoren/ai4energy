@@ -18,7 +18,7 @@ from collections import defaultdict
 
 # Add parent directory to path to import datasets and models
 sys.path.append(str(Path(__file__).parent.parent))
-from datasets.folsom import FolsomDataset
+from datasets.folsom_percent import FolsomPercentDataset
 from models import intra_hour_model
 
 
@@ -181,10 +181,11 @@ Examples:
     
     # Create test dataset
     print(f"\nCreating test dataset from: {args.data_dir}")
-    test_dataset = FolsomDataset(
+    test_dataset = FolsomPercentDataset(
         root_dir=args.data_dir,
         split="test",
-        sample_num=args.num_samples if args.num_samples else 100000  # Use large number if None
+        sample_num=args.num_samples if args.num_samples else 100000,  # Use large number if None
+        train_percent=0.8
     )
     
     if args.num_samples:
@@ -214,6 +215,7 @@ Examples:
         if (idx + 1) % 100 == 0 or (idx + 1) == len(test_dataset):
             print(f"Processed {idx + 1}/{len(test_dataset)} samples "
                   f"(Loss: {result['loss']:.6f}, MAE: {result['mae']:.6f})")
+
     
     # Save predictions with timestamps
     if args.output:

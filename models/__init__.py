@@ -1,6 +1,7 @@
 from .intra_hour_model import intra_hour_model
 from .lightning_interface import IntraHourLightningModule
 from .pvinsight import PVInsightModel, VideoEncoder, IrradianceEncoder, FusionModule
+from .skippd_model import SkippdModel
 
 __all__ = [
     'intra_hour_model',
@@ -9,5 +10,6 @@ __all__ = [
     'VideoEncoder',
     'IrradianceEncoder',
     'FusionModule',
+    'SkippdModel',
 ]
 

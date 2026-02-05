@@ -59,11 +59,13 @@ class HorizonHead(nn.Module):
         self.T = T
         self.out_channels = out_channels
 
+        '''
         self.fuse = nn.Sequential(
             nn.LayerNorm(1024),
             nn.Linear(1024, z_dim),
             nn.GELU(),
         )
+        '''
 
         self.h_emb = nn.Embedding(T, h_dim)
 
@@ -86,7 +88,8 @@ class HorizonHead(nn.Module):
         inp = torch.cat([z_rep, e], dim=-1)                 # [B,T,z_dim+h_dim]
         y = self.mlp(inp)                                   # [B,T,2]
         # Apply sigmoid to get [0, 1] range, then scale to [0, 1.2]
-        y = torch.sigmoid(y) * 1.2                          # [B,T,2] -> [0, 1.2]
+        # y = torch.sigmoid(y) * 1.2                          # [B,T,2] -> [0, 1.2]
+        y = torch.tanh(y) * 0.3
         return y.permute(0, 2, 1).contiguous()              # [B,2,T]
 
 class intra_hour_model(nn.Module):
@@ -187,13 +190,15 @@ class intra_hour_model(nn.Module):
     
         irradiance_encoded = self.irradiance_encoder(irradiance)  # [B, hidden_dim]
 
-
         # Fuse video and irradiance features
         fused = torch.cat([video_encoded, irradiance_encoded], dim=1)  # [B, 2*hidden_dim]
 
         # Final fusion and processing
-        output = self.fusion_layer(fused)  # [B, hidden_dim]
+        delta = self.fusion_layer(fused)  # [B, 2, 6]
+
+        sp = irradiance[:,0:2,-1] # [B, 2] B(ghi_kt_5min), B(dni_kt_5min)
+        sp = sp.unsqueeze(-1).expand(-1, -1, 6)  # [B, 2, 6]
+
+        output = torch.clamp(sp + delta, min=0.0, max=1.2)
         
         return output
-
-

@@ -7,7 +7,7 @@ import sys
 
 # Add parent directory to path to import datasets
 sys.path.append(str(Path(__file__).parent.parent))
-from datasets.folsom import FolsomDataset
+from datasets.folsom_percent import FolsomPercentDataset
 from models import intra_hour_model
 
 
@@ -24,13 +24,13 @@ def main():
     
     # Create datasets
     print("Creating training dataset...")
-    train_dataset = FolsomDataset(root_dir=root_dir, split="train", sample_num=50000)
+    train_dataset = FolsomPercentDataset(root_dir=root_dir, split="train", sample_num=50000, train_percent=0.8)
     
     # print("Creating test dataset...")
     # test_dataset = FolsomDataset(root_dir=root_dir, split="test", sample_num=5000)
     
     # Create data loaders
-    batch_size = 8
+    batch_size = 32
     num_workers = 32
     
     train_loader = DataLoader(
@@ -59,7 +59,7 @@ def main():
     
     model = intra_hour_model().to(device)
     criterion = torch.nn.SmoothL1Loss(beta=0.05, reduction="mean")
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), weight_decay=0.05, eps=1e-8)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4, betas=(0.9, 0.95), weight_decay=0.05, eps=1e-8)
     
     # Initialize TensorBoard writer
     log_dir = Path(__file__).parent.parent / "runs" / "folsom_training"
@@ -89,8 +89,6 @@ def main():
             # Write loss to TensorBoard
             writer.add_scalar('Loss/Train', loss.item(), global_step)
             global_step += 1
-
-            print('loss: ', epoch, batch_idx, loss.item())
         
         # Save checkpoint at the end of each epoch
         checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch+1}.pth"
