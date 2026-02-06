@@ -86,10 +86,10 @@ class HorizonHead(nn.Module):
         inp = torch.cat([z_rep, e], dim=-1)                 # [B,T,z_dim+h_dim]
         y = self.mlp(inp)                                   # [B,T,2]
         # Apply sigmoid to get [0, 1] range, then scale to [0, 1.2]
-        y = torch.sigmoid(y) * 1.2                          # [B,T,2] -> [0, 1.2]
+        y = torch.sigmoid(y) * 1.0                          # [B,T,2] -> [0, 1]
         return y.permute(0, 2, 1).contiguous()              # [B,2,T]
 
-class intra_hour_model(nn.Module):
+class intra_day_model(nn.Module):
     """
     Complete model for intra-hour forecasting.
     Combines VideoTransformer with irradiance feature processing.
@@ -134,16 +134,16 @@ class intra_hour_model(nn.Module):
         # Irradiance feature processing
         self.irradiance_encoder = SmallTCN(D=6, D_enc=hidden_dim)
         
-        # Define a custom scaling layer for [0, 1.2] range
+        # Define a custom scaling layer for [0, 1] range
         class ScaleLayer(nn.Module):
-            def __init__(self, scale=1.2):
+            def __init__(self, scale=1):
                 super().__init__()
                 self.scale = scale
             
             def forward(self, x):
                 return x * self.scale
         
-        self.fusion_layer = HorizonHead(z_dim=hidden_dim*2, h_dim=64, hidden=hidden_dim, out_channels=output_channels, T=6)
+        self.fusion_layer = HorizonHead(z_dim=2*hidden_dim, h_dim=64, hidden=hidden_dim, out_channels=output_channels, T=6)
     
     def forward(
         self, 
@@ -190,6 +190,7 @@ class intra_hour_model(nn.Module):
 
         # Fuse video and irradiance features
         fused = torch.cat([video_encoded, irradiance_encoded], dim=1)  # [B, 2*hidden_dim]
+        #fused = irradiance_encoded # [B, hidden_dim] test only
 
         # Final fusion and processing
         output = self.fusion_layer(fused)  # [B, hidden_dim]
