@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
+import tempfile
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
 import h5py
 import numpy as np
+import zarr
 
+from china_region import CHINA_REGION_POLYGONS
 from zarr_common import (
+    REGION_MAX_LAT,
+    REGION_MAX_LON,
+    REGION_MIN_LAT,
+    REGION_MIN_LON,
     TILE_PIXELS,
     initialise_or_validate_store,
+    ordered_tile_groups,
     parse_utc,
     process_frames,
     regular_times,
@@ -63,9 +73,7 @@ def scan_source_files(
 
     indexed: dict[datetime, Path] = {}
     representative: Path | None = None
-    # Do not require the former root/YYYY/YYYYMM/DD/HH hierarchy.  FY-4B files
-    # may be placed directly in root or use a different directory structure.
-    # Sorting keeps duplicate diagnostics and grid selection deterministic.
+
     for path in sorted(root.rglob("*.nc")):
         timestamp = datetime_from_filename(path)
         if timestamp is None:
@@ -269,6 +277,293 @@ def read_frame_once(
     return result, valid_result
 
 
+# Optional whole-frame tile-centre diagnostic
+# ===========================================
+
+def open_zarr_readonly(path: Path):
+    try:
+        return zarr.open_group(str(path), mode="r", zarr_format=2)
+    except TypeError:
+        return zarr.open_group(str(path), mode="r")
+
+
+def select_overview_source(root: Path) -> Path:
+    """Select one deterministic arbitrary NetCDF below the input directory."""
+    if not root.is_dir():
+        raise FileNotFoundError(
+            f"input root does not exist or is not a directory: {root}"
+        )
+    candidates = sorted(root.rglob("*.nc"))
+    if not candidates:
+        raise RuntimeError(f"no NetCDF file was found under {root}")
+    return candidates[0]
+
+
+def configured_invalid_values(dataset: h5py.Dataset) -> list[int | float]:
+    values: list[int | float] = []
+    for attribute in ("missing_value", "_FillValue"):
+        value = scalar_attribute(dataset, attribute)
+        if value is not None:
+            values.append(value.item() if isinstance(value, np.generic) else value)
+    creation = dataset.id.get_create_plist()
+    if creation.fill_value_defined() == h5py.h5d.FILL_VALUE_USER_DEFINED:
+        value = dataset.fillvalue
+        values.append(value.item() if isinstance(value, np.generic) else value)
+    return list(dict.fromkeys(values))
+
+
+def source_statistics(dataset: h5py.Dataset) -> dict[str, object]:
+    """Scan the complete source dataset without loading it all at once."""
+    row_block = dataset.chunks[0] if dataset.chunks is not None else 512
+    valid_min: int | float | None = None
+    valid_max: int | float | None = None
+    valid_count = 0
+    invalid_count = 0
+    invalid_counts: Counter[int | float] = Counter()
+
+    for row_start in range(0, dataset.shape[0], row_block):
+        values = np.asarray(dataset[row_start : row_start + row_block])
+        valid = validity_mask(dataset, values)
+        usable = values[valid]
+        invalid = values[~valid]
+        valid_count += int(usable.size)
+        invalid_count += int(invalid.size)
+        if usable.size:
+            block_min = usable.min().item()
+            block_max = usable.max().item()
+            valid_min = block_min if valid_min is None else min(valid_min, block_min)
+            valid_max = block_max if valid_max is None else max(valid_max, block_max)
+        if invalid.size:
+            unique, counts = np.unique(invalid, return_counts=True)
+            invalid_counts.update(
+                {
+                    value.item(): int(count)
+                    for value, count in zip(unique, counts)
+                }
+            )
+
+    scale_attribute = scalar_attribute(dataset, "scale_factor")
+    offset_attribute = scalar_attribute(dataset, "add_offset")
+    scale = 1.0 if scale_attribute is None else float(scale_attribute)
+    offset = 0.0 if offset_attribute is None else float(offset_attribute)
+    physical_limits = (
+        []
+        if valid_min is None or valid_max is None
+        else sorted((valid_min * scale + offset, valid_max * scale + offset))
+    )
+    return {
+        "valid_min": valid_min,
+        "valid_max": valid_max,
+        "physical_min": physical_limits[0] if physical_limits else None,
+        "physical_max": physical_limits[1] if physical_limits else None,
+        "scale_factor": scale,
+        "add_offset": offset,
+        "valid_count": valid_count,
+        "invalid_count": invalid_count,
+        "configured_invalid_values": configured_invalid_values(dataset),
+        "observed_invalid_values": dict(sorted(invalid_counts.items())),
+    }
+
+
+def robust_limits(values: np.ndarray, valid: np.ndarray) -> tuple[float, float]:
+    usable = values[valid]
+    if usable.size == 0:
+        return 0.0, 1.0
+    low, high = np.percentile(usable.astype(np.float64), [2.0, 98.0])
+    if not np.isfinite(low) or not np.isfinite(high) or low == high:
+        low, high = float(usable.min()), float(usable.max())
+    if low == high:
+        high = low + 1.0
+    return float(low), float(high)
+
+
+def coordinate_edges(coordinate: np.ndarray) -> tuple[float, float]:
+    values = np.asarray(coordinate, dtype=np.float64)
+    if values.ndim != 1 or values.size < 2:
+        raise RuntimeError("plot coordinate must be a one-dimensional vector")
+    delta = np.diff(values)
+    if not np.all(delta > 0):
+        raise RuntimeError("plot coordinate must be strictly increasing")
+    return (
+        float(values[0] - delta[0] / 2.0),
+        float(values[-1] + delta[-1] / 2.0),
+    )
+
+
+def draw_all_tile_centres(
+    data_path: str | Path = DEFAULT_PATH,
+    zarr_path: str | Path = DEFAULT_OUTPUT,
+    png_path: str | Path | None = None,
+    show: bool = False,
+    maximum_display_pixels: int = 4_000_000,
+) -> dict[str, object]:
+    """Draw one whole L2 image with China, bounds, and all tile centres."""
+    if png_path is None and not show:
+        raise ValueError("set png_path or show=True")
+    if png_path is not None and show:
+        raise ValueError("png_path and show=True are mutually exclusive")
+    if maximum_display_pixels <= 0:
+        raise ValueError("maximum_display_pixels must be positive")
+
+    input_root = Path(data_path).expanduser().resolve()
+    store_path = Path(zarr_path).expanduser().resolve()
+    source_path = select_overview_source(input_root)
+    root = open_zarr_readonly(store_path)
+    tiles = ordered_tile_groups(root)
+    if not tiles:
+        raise RuntimeError(f"{store_path} contains no tile groups")
+    tile_longitude = np.asarray(
+        [float(tile["longitude"][0]) for tile in tiles], dtype=np.float64
+    )
+    tile_latitude = np.asarray(
+        [float(tile["latitude"][0]) for tile in tiles], dtype=np.float64
+    )
+
+    with h5py.File(source_path, "r") as source:
+        channel = CHANNELS[0]
+        if channel not in source:
+            raise KeyError(f"{source_path} lacks channel {channel!r}")
+        dataset = source[channel]
+        if dataset.ndim != 2:
+            raise RuntimeError(f"{source_path}:{channel} is not a 2-D image")
+        latitude = np.asarray(source["latitude"][:], dtype=np.float64)
+        longitude = np.asarray(source["longitude"][:], dtype=np.float64)
+        statistics = source_statistics(dataset)
+        stride = max(
+            1,
+            int(np.ceil(np.sqrt(dataset.size / maximum_display_pixels))),
+        )
+        image = np.asarray(dataset[::stride, ::stride])
+        image_valid = validity_mask(dataset, image)
+
+    if longitude[0] > longitude[-1]:
+        longitude = longitude[::-1]
+        image = image[:, ::-1]
+        image_valid = image_valid[:, ::-1]
+    if latitude[0] > latitude[-1]:
+        latitude = latitude[::-1]
+        image = image[::-1, :]
+        image_valid = image_valid[::-1, :]
+    lon_min, lon_max = coordinate_edges(longitude)
+    lat_min, lat_max = coordinate_edges(latitude)
+
+    print(f"Overview source: {source_path}")
+    print(
+        f"Packed valid min/max: {statistics['valid_min']} / "
+        f"{statistics['valid_max']}"
+    )
+    print(
+        f"Physical min/max: {statistics['physical_min']} / "
+        f"{statistics['physical_max']} "
+        f"(packed * {statistics['scale_factor']} + "
+        f"{statistics['add_offset']})"
+    )
+    print(
+        f"Valid/invalid pixels: {statistics['valid_count']} / "
+        f"{statistics['invalid_count']}"
+    )
+    print(
+        "Configured invalid values: "
+        f"{statistics['configured_invalid_values'] or 'none'}"
+    )
+    print(
+        "Observed invalid values and counts: "
+        f"{statistics['observed_invalid_values'] or 'none'}"
+    )
+
+    os.environ.setdefault(
+        "MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "himawari_matplotlib")
+    )
+    if not show:
+        import matplotlib
+
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    low, high = robust_limits(image, image_valid)
+    displayed = np.ma.array(image, mask=~image_valid)
+    cmap = plt.get_cmap("gray").copy()
+    cmap.set_bad("#8c8c8c")
+    figure, axis = plt.subplots(figsize=(12, 8), constrained_layout=True)
+    plotted = axis.imshow(
+        displayed,
+        cmap=cmap,
+        vmin=low,
+        vmax=high,
+        origin="lower",
+        extent=(lon_min, lon_max, lat_min, lat_max),
+        interpolation="nearest",
+        aspect="equal",
+    )
+    for polygon_index, polygon in enumerate(CHINA_REGION_POLYGONS):
+        closed = np.vstack((polygon, polygon[0]))
+        axis.plot(
+            closed[:, 0],
+            closed[:, 1],
+            color="#ffd54f",
+            linewidth=1.5,
+            label="China region" if polygon_index == 0 else None,
+        )
+    boundary_longitude = np.asarray(
+        [
+            REGION_MIN_LON,
+            REGION_MAX_LON,
+            REGION_MAX_LON,
+            REGION_MIN_LON,
+            REGION_MIN_LON,
+        ]
+    )
+    boundary_latitude = np.asarray(
+        [
+            REGION_MIN_LAT,
+            REGION_MIN_LAT,
+            REGION_MAX_LAT,
+            REGION_MAX_LAT,
+            REGION_MIN_LAT,
+        ]
+    )
+    axis.plot(
+        boundary_longitude,
+        boundary_latitude,
+        color="#00e5ff",
+        linewidth=1.8,
+        label="Tile-centre bounds",
+    )
+    axis.scatter(
+        tile_longitude,
+        tile_latitude,
+        s=24,
+        color="#ff2d2d",
+        edgecolor="white",
+        linewidth=0.5,
+        label=f"Tile centres ({len(tiles)})",
+        zorder=4,
+    )
+    timestamp = datetime_from_filename(source_path)
+    time_text = (
+        "unknown time"
+        if timestamp is None
+        else f"{timestamp:%Y-%m-%d %H:%M} UTC"
+    )
+    axis.set_title(f"All tile centres | {time_text} | {CHANNELS[0]}")
+    axis.set_xlabel("longitude (degrees east)")
+    axis.set_ylabel("latitude (degrees north)")
+    axis.legend(loc="best")
+    figure.colorbar(plotted, ax=axis, shrink=0.85).set_label(
+        f"{CHANNELS[0]} packed value"
+    )
+
+    if png_path is not None:
+        destination = Path(png_path).expanduser().resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(destination, dpi=160)
+        print(f"Tile-centres PNG: {destination}")
+    else:
+        plt.show()
+    plt.close(figure)
+    return statistics
+
+
 # Command-line and Python entry points
 # ====================================
 
@@ -293,6 +588,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fail-fast", action="store_true")
+    overview_output = parser.add_mutually_exclusive_group()
+    overview_output.add_argument(
+        "--png-path",
+        type=Path,
+        default=None,
+        help="save the tile-centres overview to this PNG without showing it",
+    )
+    overview_output.add_argument(
+        "--show",
+        action="store_true",
+        help="show the tile-centres overview without saving it",
+    )
     return parser
 
 
@@ -371,6 +678,13 @@ def main(argv: Iterable[str] | None = None) -> int:
             seed=args.seed,
             fail_fast=args.fail_fast,
         )
+        if args.png_path is not None or args.show:
+            draw_all_tile_centres(
+                data_path=args.data_path,
+                zarr_path=args.output,
+                png_path=args.png_path,
+                show=args.show,
+            )
     except Exception as error:
         print(f"FATAL: {error}", file=sys.stderr)
         return 2
