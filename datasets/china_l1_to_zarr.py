@@ -8,8 +8,10 @@ and the source fill value is represented by the common Zarr ``-1`` fill.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,12 +19,20 @@ from typing import Iterable, Sequence
 
 import h5py
 import numpy as np
+import zarr
 from pyproj import CRS, Transformer
 
+from china_region import CHINA_REGION_POLYGONS
 from zarr_common import (
+    DEFAULT_INTERVAL,
     IMAGE_FILL_VALUE,
+    REGION_MAX_LAT,
+    REGION_MAX_LON,
+    REGION_MIN_LAT,
+    REGION_MIN_LON,
     TILE_PIXELS,
     initialise_or_validate_store,
+    ordered_tile_groups,
     process_frames,
     sample_tiles,
     target_lon_lat,
@@ -30,16 +40,11 @@ from zarr_common import (
 )
 
 
-EXPECTED_FILENAME = (
-    "FY4B-_AGRI--_N_DISK_1050E_L1-_FDI-_MULT_NOM_"
-    "20250101050000_20250101051459_0500M_V0001.HDF"
-)
-DEFAULT_PATH = Path("trial") / EXPECTED_FILENAME
+DEFAULT_PATH = Path("trial")
 DEFAULT_TILE = 100
 DEFAULT_OUTPUT = Path("trial_l1.zarr")
 DEFAULT_START = "2025-01-01 05:00"
-DEFAULT_END = "2025-01-01 05:00"
-DEFAULT_INTERVAL_MINUTES = 15
+DEFAULT_END = "2025-01-01 06:00"
 DEFAULT_CHANNELS = ("NOMChannel02",)
 EXPECTED_SOURCE_SHAPE = (21_984, 21_984)
 MICRORADIANS_TO_RADIANS = 1.0e-6
@@ -495,6 +500,253 @@ def source_metadata(path: Path, grid: Fy4Grid) -> dict[str, object]:
     return metadata
 
 
+# Optional whole-frame tile-centre diagnostic
+# ===========================================
+
+def open_zarr_readonly(path: Path):
+    try:
+        return zarr.open_group(str(path), mode="r", zarr_format=2)
+    except TypeError:
+        return zarr.open_group(str(path), mode="r")
+
+
+def select_overview_source(path: Path) -> Path:
+    """Select one deterministic canonical FY-4B AGRI source frame."""
+    for candidate in source_candidates(path):
+        if datetime_from_filename(candidate) is not None:
+            return candidate
+    raise RuntimeError(f"no canonical FY-4B AGRI HDF file was found under {path}")
+
+
+def robust_limits(values: np.ndarray, valid: np.ndarray) -> tuple[float, float]:
+    usable = values[valid]
+    if usable.size == 0:
+        return 0.0, 1.0
+    low, high = np.percentile(usable.astype(np.float64), [2.0, 98.0])
+    if not np.isfinite(low) or not np.isfinite(high) or low == high:
+        low, high = float(usable.min()), float(usable.max())
+    if low == high:
+        high = low + 1.0
+    return float(low), float(high)
+
+
+def source_pixel_coordinates(
+    longitude: np.ndarray,
+    latitude: np.ndarray,
+    grid: Fy4Grid,
+    transformer: Transformer,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project geographic positions into fractional FY-4B source pixels."""
+    source_x, source_y = transformer.transform(longitude, latitude)
+    source_u = (
+        np.asarray(source_x, dtype=np.float64) / grid.column_step_m
+        + (grid.shape[1] - 1) / 2.0
+    )
+    source_v = (
+        (grid.shape[0] - 1) / 2.0
+        - np.asarray(source_y, dtype=np.float64) / grid.line_step_m
+    )
+    valid = (
+        np.isfinite(source_u)
+        & np.isfinite(source_v)
+        & (source_u >= 0)
+        & (source_v >= 0)
+        & (source_u < grid.shape[1])
+        & (source_v < grid.shape[0])
+    )
+    return source_u, source_v, valid
+
+
+def region_boundary(samples_per_edge: int = 200) -> tuple[np.ndarray, np.ndarray]:
+    """Return a densely sampled closed tile-centre bounds rectangle."""
+    west_to_east = np.linspace(REGION_MIN_LON, REGION_MAX_LON, samples_per_edge)
+    south_to_north = np.linspace(REGION_MIN_LAT, REGION_MAX_LAT, samples_per_edge)
+    longitude = np.concatenate(
+        (
+            west_to_east,
+            np.full(samples_per_edge, REGION_MAX_LON),
+            west_to_east[::-1],
+            np.full(samples_per_edge, REGION_MIN_LON),
+        )
+    )
+    latitude = np.concatenate(
+        (
+            np.full(samples_per_edge, REGION_MIN_LAT),
+            south_to_north,
+            np.full(samples_per_edge, REGION_MAX_LAT),
+            south_to_north[::-1],
+        )
+    )
+    return longitude, latitude
+
+
+def draw_all_tile_centres(
+    data_path: str | Path = DEFAULT_PATH,
+    zarr_path: str | Path = DEFAULT_OUTPUT,
+    channel: str = DEFAULT_CHANNELS[0],
+    png_path: str | Path | None = None,
+    show: bool = False,
+    maximum_display_pixels: int = 4_000_000,
+) -> dict[str, object]:
+    """Draw a downsampled L1 full disk with China and all Zarr tile centres."""
+    if png_path is None and not show:
+        raise ValueError("set png_path or show=True")
+    if png_path is not None and show:
+        raise ValueError("png_path and show=True are mutually exclusive")
+    if maximum_display_pixels <= 0:
+        raise ValueError("maximum_display_pixels must be positive")
+
+    input_path = Path(data_path).expanduser().resolve()
+    store_path = Path(zarr_path).expanduser().resolve()
+    source_path = select_overview_source(input_path)
+    normalized_channel = canonical_channel(channel)
+    dataset_path = channel_dataset_path(normalized_channel)
+    grid = read_grid(source_path, (normalized_channel,))
+
+    root = open_zarr_readonly(store_path)
+    tiles = ordered_tile_groups(root)
+    if not tiles:
+        raise RuntimeError(f"{store_path} contains no tile groups")
+    stored_channels = [str(value) for value in tiles[0]["channel"][:].tolist()]
+    if normalized_channel not in stored_channels:
+        raise RuntimeError(
+            f"{store_path} channels {stored_channels} do not contain "
+            f"{normalized_channel!r}"
+        )
+    tile_longitude = np.asarray(
+        [float(tile["longitude"][0]) for tile in tiles], dtype=np.float64
+    )
+    tile_latitude = np.asarray(
+        [float(tile["latitude"][0]) for tile in tiles], dtype=np.float64
+    )
+
+    with h5py.File(source_path, "r") as source:
+        dataset = source[dataset_path]
+        stride = max(
+            1,
+            int(np.ceil(np.sqrt(dataset.size / maximum_display_pixels))),
+        )
+        image = np.asarray(dataset[::stride, ::stride])
+        image_valid = validity_mask(dataset, image)
+
+    transformer = Transformer.from_crs(
+        CRS.from_epsg(4326), grid.crs, always_xy=True
+    )
+    tile_u, tile_v, tile_visible = source_pixel_coordinates(
+        tile_longitude, tile_latitude, grid, transformer
+    )
+    if not tile_visible.all():
+        raise RuntimeError("one or more stored tile centres are outside the L1 disk")
+
+    os.environ.setdefault(
+        "MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "himawari_matplotlib")
+    )
+    if not show:
+        import matplotlib
+
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    low, high = robust_limits(image, image_valid)
+    displayed = np.ma.array(image, mask=~image_valid)
+    cmap = plt.get_cmap("gray").copy()
+    cmap.set_bad("#8c8c8c")
+    figure, axis = plt.subplots(figsize=(10, 9), constrained_layout=True)
+    plotted = axis.imshow(
+        displayed,
+        cmap=cmap,
+        vmin=low,
+        vmax=high,
+        origin="upper",
+        extent=(-0.5, grid.shape[1] - 0.5, grid.shape[0] - 0.5, -0.5),
+        interpolation="nearest",
+        aspect="equal",
+    )
+
+    for polygon_index, polygon in enumerate(CHINA_REGION_POLYGONS):
+        closed = np.vstack((polygon, polygon[0]))
+        polygon_u, polygon_v, visible = source_pixel_coordinates(
+            closed[:, 0], closed[:, 1], grid, transformer
+        )
+        axis.plot(
+            polygon_u[visible],
+            polygon_v[visible],
+            color="#ffd54f",
+            linewidth=1.5,
+            label="China region" if polygon_index == 0 else None,
+            zorder=3,
+        )
+
+    boundary_longitude, boundary_latitude = region_boundary()
+    boundary_u, boundary_v, boundary_visible = source_pixel_coordinates(
+        boundary_longitude, boundary_latitude, grid, transformer
+    )
+    axis.plot(
+        boundary_u[boundary_visible],
+        boundary_v[boundary_visible],
+        color="#00e5ff",
+        linewidth=1.8,
+        label="Tile-centre bounds",
+        zorder=3,
+    )
+    axis.scatter(
+        tile_u,
+        tile_v,
+        s=24,
+        color="#ff2d2d",
+        edgecolor="white",
+        linewidth=0.5,
+        label=f"Tile centres ({len(tiles)})",
+        zorder=4,
+    )
+
+    timestamp = datetime_from_filename(source_path)
+    time_text = (
+        "unknown time"
+        if timestamp is None
+        else f"{timestamp:%Y-%m-%d %H:%M} UTC"
+    )
+    axis.set_title(
+        f"All tile centres | {time_text} | {normalized_channel}"
+    )
+    axis.set_xlabel("FY-4B source u (column)")
+    axis.set_ylabel("FY-4B source v (row)")
+    axis.legend(loc="best")
+    figure.colorbar(plotted, ax=axis, shrink=0.82).set_label(
+        f"{normalized_channel} raw DN"
+    )
+
+    destination: Path | None = None
+    if png_path is not None:
+        destination = Path(png_path).expanduser().resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(destination, dpi=160)
+        print(f"Tile-centres PNG: {destination}")
+    else:
+        plt.show()
+    plt.close(figure)
+
+    usable = image[image_valid]
+    statistics: dict[str, object] = {
+        "source": source_path,
+        "channel": normalized_channel,
+        "source_shape": list(grid.shape),
+        "display_stride": stride,
+        "display_shape": list(image.shape),
+        "display_valid_count": int(image_valid.sum()),
+        "display_invalid_count": int((~image_valid).sum()),
+        "display_valid_min": None if usable.size == 0 else int(usable.min()),
+        "display_valid_max": None if usable.size == 0 else int(usable.max()),
+        "png": destination,
+    }
+    print(
+        f"Overview source: {source_path}; channel: {normalized_channel}; "
+        f"stride: {stride}; displayed valid DN min/max: "
+        f"{statistics['display_valid_min']} / {statistics['display_valid_max']}"
+    )
+    return statistics
+
+
 # Command-line and Python entry points
 # ====================================
 
@@ -517,10 +769,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--interval-minutes",
         type=int,
-        default=DEFAULT_INTERVAL_MINUTES,
+        default=DEFAULT_INTERVAL,
         help=(
             "timeline interval in minutes "
-            f"(default: {DEFAULT_INTERVAL_MINUTES})"
+            f"(default: {DEFAULT_INTERVAL})"
         ),
     )
     parser.add_argument("--n-tile", type=int, default=DEFAULT_TILE)
@@ -529,13 +781,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--channels", nargs="+", default=list(DEFAULT_CHANNELS))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fail-fast", action="store_true")
+    overview_output = parser.add_mutually_exclusive_group()
+    overview_output.add_argument(
+        "--png-path",
+        type=Path,
+        default=None,
+        help="save the tile-centres overview to this PNG without showing it",
+    )
+    overview_output.add_argument(
+        "--show",
+        action="store_true",
+        help="show the tile-centres overview without saving it",
+    )
     return parser
 
 
 def convert(
     start: str | datetime = DEFAULT_START,
     end: str | datetime = DEFAULT_END,
-    interval_minutes: int = DEFAULT_INTERVAL_MINUTES,
+    interval_minutes: int = DEFAULT_INTERVAL,
     n_tile: int = DEFAULT_TILE,
     path: str | Path = DEFAULT_PATH,
     output: str | Path = DEFAULT_OUTPUT,
@@ -628,6 +892,14 @@ def main(argv: Iterable[str] | None = None) -> int:
             seed=args.seed,
             fail_fast=args.fail_fast,
         )
+        if args.png_path is not None or args.show:
+            draw_all_tile_centres(
+                data_path=args.data_path,
+                zarr_path=args.output,
+                channel=args.channels[0],
+                png_path=args.png_path,
+                show=args.show,
+            )
     except Exception as error:
         print(f"FATAL: {error}", file=sys.stderr)
         return 2

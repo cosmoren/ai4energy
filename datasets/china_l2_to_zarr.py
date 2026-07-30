@@ -8,7 +8,7 @@ import re
 import sys
 import tempfile
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -18,6 +18,7 @@ import zarr
 
 from china_region import CHINA_REGION_POLYGONS
 from zarr_common import (
+    DEFAULT_INTERVAL,
     REGION_MAX_LAT,
     REGION_MAX_LON,
     REGION_MIN_LAT,
@@ -25,9 +26,7 @@ from zarr_common import (
     TILE_PIXELS,
     initialise_or_validate_store,
     ordered_tile_groups,
-    parse_utc,
     process_frames,
-    regular_times,
     sample_tiles,
     target_lon_lat,
     unix_seconds,
@@ -38,13 +37,54 @@ DEFAULT_PATH = Path("trial/")
 DEFAULT_TILE = 100
 DEFAULT_OUTPUT = Path("trial_l2.zarr")
 DEFAULT_START = "2026-01-01 05:00"
-DEFAULT_END = "2026-01-01 05:50"
+DEFAULT_END = "2026-01-01 06:00"
 CHANNELS = ("GHI",)
 
 FILENAME_RE = re.compile(
     r"^FY4B_REGC_1050E_500M_(?P<date>\d{8})(?P<time>\d{4})_grid_GHI\.nc$",
     re.IGNORECASE,
 )
+
+
+# Time and source discovery
+# =========================
+
+def parse_utc(value: str) -> datetime:
+    """Parse a timezone-aware or naive UTC timestamp aligned to a minute."""
+    text = value.strip().replace("T", " ")
+    if text.endswith("Z"):
+        text = text[:-1].strip()
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    if parsed.second or parsed.microsecond:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} must be aligned to an exact UTC minute"
+        )
+    return parsed
+
+
+def regular_times(
+    start: datetime,
+    end: datetime,
+    interval_minutes: int,
+) -> list[datetime]:
+    """Return an inclusive timeline at the requested minute cadence."""
+    if interval_minutes <= 0:
+        raise ValueError("interval_minutes must be positive")
+    if end < start:
+        raise ValueError("end must be greater than or equal to start")
+    step = timedelta(minutes=interval_minutes)
+    elapsed_seconds = int((end - start).total_seconds())
+    step_seconds = int(step.total_seconds())
+    if elapsed_seconds % step_seconds:
+        raise ValueError(
+            "end must be an integer number of --interval-minutes after start"
+        )
+    return [
+        start + index * step
+        for index in range(elapsed_seconds // step_seconds + 1)
+    ]
 
 
 # L2 NetCDF discovery
@@ -73,7 +113,9 @@ def scan_source_files(
 
     indexed: dict[datetime, Path] = {}
     representative: Path | None = None
-
+    # Do not require the former root/YYYY/YYYYMM/DD/HH hierarchy.  FY-4B files
+    # may be placed directly in root or use a different directory structure.
+    # Sorting keeps duplicate diagnostics and grid selection deterministic.
     for path in sorted(root.rglob("*.nc")):
         timestamp = datetime_from_filename(path)
         if timestamp is None:
@@ -583,6 +625,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=parse_utc(DEFAULT_END),
         help=f"inclusive UTC end (default: {DEFAULT_END})",
     )
+    parser.add_argument(
+        "--interval-minutes",
+        type=int,
+        default=DEFAULT_INTERVAL,
+        help=f"timeline interval in minutes (default: {DEFAULT_INTERVAL})",
+    )
     parser.add_argument("--n-tile", type=int, default=DEFAULT_TILE)
     parser.add_argument("--data-path", type=Path, default=DEFAULT_PATH)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -606,6 +654,7 @@ def build_parser() -> argparse.ArgumentParser:
 def convert(
     start: str | datetime = DEFAULT_START,
     end: str | datetime = DEFAULT_END,
+    interval_minutes: int = DEFAULT_INTERVAL,
     n_tile: int = DEFAULT_TILE,
     path: str | Path = DEFAULT_PATH,
     output: str | Path = DEFAULT_OUTPUT,
@@ -626,14 +675,15 @@ def convert(
     input_root = Path(path).expanduser().resolve()
     output_path = Path(output).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    timeline = regular_times(start_time, end_time)
+    timeline = regular_times(start_time, end_time, interval_minutes)
     timestamps = unix_seconds(timeline)
 
     print(f"Input:  {input_root}")
     print(f"Output: {output_path}")
     print(
         f"Range:  {start_time.isoformat(sep=' ')} to "
-        f"{end_time.isoformat(sep=' ')} UTC ({len(timeline)} slots)"
+        f"{end_time.isoformat(sep=' ')} UTC "
+        f"({len(timeline)} slots at {interval_minutes}-minute cadence)"
     )
     print(f"Tiles:  {n_tile}; channels: {', '.join(CHANNELS)}")
 
@@ -652,6 +702,7 @@ def convert(
             "source_format": "FY-4B GHI NetCDF-4/HDF5",
             "source_projection": "regular one-dimensional latitude/longitude",
             "resampling": "nearest source coordinate",
+            "frame_interval_minutes": interval_minutes,
         },
     )
     result = process_frames(
@@ -672,6 +723,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         _, _, failed = convert(
             start=args.start,
             end=args.end,
+            interval_minutes=args.interval_minutes,
             n_tile=args.n_tile,
             path=args.data_path,
             output=args.output,

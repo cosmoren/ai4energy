@@ -34,7 +34,8 @@ from pyproj import CRS, Transformer
 # Dataset contract
 # =======================
 
-FRAME_INTERVAL = timedelta(minutes=10)
+DEFAULT_INTERVAL = 15
+FRAME_INTERVAL = timedelta(minutes=DEFAULT_INTERVAL)
 TILE_WIDTH_M = 500_000.0
 TARGET_PIXEL_M = 5_000.0
 TILE_PIXELS = 100
@@ -64,18 +65,22 @@ def parse_utc(value: str) -> datetime:
     parsed = datetime.fromisoformat(text)
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-    if parsed.second or parsed.microsecond or parsed.minute % 10:
+    if parsed.second or parsed.microsecond or parsed.minute % DEFAULT_INTERVAL:
         raise argparse.ArgumentTypeError(
-            f"{value!r} is not aligned to an exact 10-minute UTC boundary"
+            f"{value!r} is not aligned to an exact "
+            f"{DEFAULT_INTERVAL}-minute UTC boundary"
         )
     return parsed
 
 
 def regular_times(start: datetime, end: datetime) -> list[datetime]:
-    """Return every exact 10-minute timestamp in an inclusive UTC range."""
+    """Return timestamps at the default cadence in an inclusive UTC range."""
     for label, value in (("start", start), ("end", end)):
-        if value.second or value.microsecond or value.minute % 10:
-            raise ValueError(f"{label} is not aligned to an exact 10-minute boundary")
+        if value.second or value.microsecond or value.minute % DEFAULT_INTERVAL:
+            raise ValueError(
+                f"{label} is not aligned to an exact "
+                f"{DEFAULT_INTERVAL}-minute boundary"
+            )
     if end < start:
         raise ValueError("end must be greater than or equal to start")
     count = int((end - start) // FRAME_INTERVAL) + 1
@@ -615,6 +620,7 @@ def process_frames(
 
 
 __all__ = [
+    "DEFAULT_INTERVAL",
     "FRAME_INTERVAL",
     "IMAGE_FILL_VALUE",
     "LAYOUT",
