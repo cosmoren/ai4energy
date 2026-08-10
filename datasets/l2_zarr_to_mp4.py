@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import zarr
 from astral import LocationInfo
-from astral.sun import sun
+from astral.sun import sunrise, sunset
 
 
 DEFAULT_CHANNEL = "GHI"
@@ -90,14 +90,13 @@ def daylight_interval_utc(
         latitude=latitude,
         longitude=longitude,
     )
-    events = sun(
-        location.observer,
-        date=local_day,
-        tzinfo=local_timezone,
-    )
+
+    sunrise_local = sunrise(location.observer, date=local_day, tzinfo=local_timezone)
+    sunset_local = sunset(location.observer, date=local_day, tzinfo=local_timezone)
+
     return (
-        events["sunrise"].astimezone(timezone.utc),
-        events["sunset"].astimezone(timezone.utc),
+        sunrise_local.astimezone(timezone.utc),
+        sunset_local.astimezone(timezone.utc),
     )
 
 
@@ -216,12 +215,15 @@ def process_tile(
         if interval_start < interval_end:
             indices = np.flatnonzero(
                 (time_utc >= int(np.ceil(interval_start.timestamp())))
-                & (time_utc < int(np.ceil(interval_end.timestamp())))
+                & (time_utc <= int(np.ceil(interval_end.timestamp())))
             )
 
             if indices.size:
-                start_date_text = sunrise_utc.strftime("%Y%m%d")
-                end_date_text = sunset_utc.strftime("%Y%m%d")
+                first_frame = utc_datetime(time_utc[indices[0]])
+                last_frame = utc_datetime(time_utc[indices[-1]])
+                
+                start_date_text = first_frame.strftime("%Y%m%d%H%M")
+                end_date_text = last_frame.strftime("%Y%m%d%H%M")
                 output_path = (
                     tile_output
                     / f"{start_date_text}_{end_date_text}.mp4"
