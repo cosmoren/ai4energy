@@ -1,7 +1,10 @@
+# python l2_zarr_to_mp4.py --input-dir ~/data/himawari_l2_300.zarr --output-dir ~/data/himawari_l2_300_mp4 --start "2024-01-01 00:00" --end "2026-01-01 00:00" --channel CLOT
+
 from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -13,7 +16,7 @@ from astral import LocationInfo
 from astral.sun import sunrise, sunset
 
 
-DEFAULT_CHANNEL = "GHI"
+DEFAULT_CHANNEL = "CLOT"
 DEFAULT_VALUE_MIN = 0.0
 DEFAULT_VALUE_MAX = 32767.0
 DEFAULT_FPS = 8.0
@@ -42,29 +45,37 @@ def map_to_uint8(values: np.ndarray, value_min: float, value_max: float) -> np.n
     return np.rint(np.clip(scaled, 0.0, 1.0) * 255.0).astype(np.uint8)
 
 
-def get_tile_index(path: Path) -> int:
-    name = path.name
-    if not name.startswith("tile_") or not name.endswith(".zarr"):
-        raise ValueError(f"invalid tile path: {path}")
-    return int(name[5:-5])
+def discover_tiles(root, selected: list[int] | None) -> list[tuple[int, object]]:
+    """Return (tile_index, tile_group) from a store with tile_N subgroups."""
+    indices: list[int] = []
+    for name in root.group_keys():
+        match = re.fullmatch(r"tile_(\d+)", name)
+        if match is None:
+            raise RuntimeError(f"unexpected Zarr group at root: {name!r}")
+        indices.append(int(match.group(1)))
+    indices.sort()
+    if not indices:
+        return []
+    if indices != list(range(len(indices))):
+        raise RuntimeError(
+            f"tile groups must be contiguous from tile_0: "
+            f"{[f'tile_{i}' for i in indices]}"
+        )
 
-
-def discover_tiles(input_dir: Path, selected: list[int] | None) -> list[Path]:
-    tiles = sorted(input_dir.glob("tile_*.zarr"), key=get_tile_index)
     if selected is None:
-        return tiles
+        selected_indices = indices
+    else:
+        selected_set = set(selected)
+        missing = sorted(selected_set - set(indices))
+        if missing:
+            raise FileNotFoundError(f"missing tiles: {missing}")
+        selected_indices = sorted(selected_set)
 
-    selected_set = set(selected)
-    result = [path for path in tiles if get_tile_index(path) in selected_set]
-    found = {get_tile_index(path) for path in result}
-    missing = sorted(selected_set - found)
-    if missing:
-        raise FileNotFoundError(f"missing tiles: {missing}")
-    return result
+    return [(index, root[f"tile_{index}"]) for index in selected_indices]
 
 
-def get_channel_index(root, channel: str) -> int:
-    channels = [str(value) for value in root["channel"][:].tolist()]
+def get_channel_index(tile, channel: str) -> int:
+    channels = [str(value) for value in tile["channel"][:].tolist()]
     try:
         return channels.index(channel)
     except ValueError as error:
@@ -82,7 +93,8 @@ def daylight_interval_utc(
     latitude: float,
     longitude: float,
     local_timezone: ZoneInfo,
-) -> tuple[datetime, datetime]:
+) -> tuple[datetime, datetime] | None:
+    """Return sunrise/sunset UTC, or None when the sun does not rise/set."""
     location = LocationInfo(
         name="tile",
         region="",
@@ -90,6 +102,7 @@ def daylight_interval_utc(
         latitude=latitude,
         longitude=longitude,
     )
+<<<<<<< Updated upstream
 
     sunrise_local = sunrise(location.observer, date=local_day, tzinfo=local_timezone)
     sunset_local = sunset(location.observer, date=local_day, tzinfo=local_timezone)
@@ -98,6 +111,14 @@ def daylight_interval_utc(
         sunrise_local.astimezone(timezone.utc),
         sunset_local.astimezone(timezone.utc),
     )
+=======
+    try:
+        rise = sunrise(location.observer, date=local_day, tzinfo=local_timezone)
+        set_ = sunset(location.observer, date=local_day, tzinfo=local_timezone)
+    except ValueError:
+        return None
+    return rise.astimezone(timezone.utc), set_.astimezone(timezone.utc)
+>>>>>>> Stashed changes
 
 
 def write_video(
@@ -164,7 +185,8 @@ def write_video(
 
 
 def process_tile(
-    tile_path: Path,
+    tile,
+    tile_index: int,
     output_dir: Path,
     start_utc: datetime,
     end_utc: datetime,
@@ -175,40 +197,43 @@ def process_tile(
     codec: str,
     local_timezone: ZoneInfo,
 ) -> list[dict[str, object]]:
-    root = open_group(tile_path)
-
-    images = root["images"]
-    pixel_valid = root["pixel_valid"]
-    frame_valid = root["frame_valid"]
-    time_utc = np.asarray(root["time_utc"][:], dtype=np.int64)
+    images = tile["images"]
+    pixel_valid = tile["pixel_valid"]
+    frame_valid = tile["frame_valid"]
+    time_utc = np.asarray(tile["time_utc"][:], dtype=np.int64)
+    label = f"tile_{tile_index}"
 
     if images.shape != pixel_valid.shape:
-        raise RuntimeError(f"{tile_path}: images/pixel_valid shape mismatch")
+        raise RuntimeError(f"{label}: images/pixel_valid shape mismatch")
     if images.shape[0] != frame_valid.shape[0]:
-        raise RuntimeError(f"{tile_path}: frame_valid length mismatch")
+        raise RuntimeError(f"{label}: frame_valid length mismatch")
     if images.shape[0] != time_utc.shape[0]:
-        raise RuntimeError(f"{tile_path}: time_utc length mismatch")
+        raise RuntimeError(f"{label}: time_utc length mismatch")
 
-    channel_index = get_channel_index(root, channel)
-    latitude = float(root["latitude"][0])
-    longitude = float(root["longitude"][0])
-    tile_index = get_tile_index(tile_path)
+    channel_index = get_channel_index(tile, channel)
+    latitude = float(tile["latitude"][0])
+    longitude = float(tile["longitude"][0])
 
     local_start_day = start_utc.astimezone(local_timezone).date()
     local_end_day = end_utc.astimezone(local_timezone).date()
 
     records: list[dict[str, object]] = []
     current_day = local_start_day
-    tile_output = output_dir / f"tile_{tile_index}"
+    tile_output = output_dir / label
 
     while current_day <= local_end_day:
-        sunrise_utc, sunset_utc = daylight_interval_utc(
+        daylight = daylight_interval_utc(
             current_day,
             latitude,
             longitude,
             local_timezone,
         )
+        if daylight is None:
+            print(f"SKIP {label} {current_day}: no sunrise/sunset")
+            current_day += timedelta(days=1)
+            continue
 
+        sunrise_utc, sunset_utc = daylight
         interval_start = max(sunrise_utc, start_utc)
         interval_end = min(sunset_utc, end_utc + timedelta(microseconds=1))
 
@@ -267,7 +292,7 @@ def process_tile(
                 records.append(record)
 
                 print(
-                    f"DONE tile_{tile_index} {current_day}: "
+                    f"DONE {label} {current_day}: "
                     f"{indices.size} frames -> {output_path.name}"
                 )
 
@@ -277,8 +302,18 @@ def process_tile(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input-dir", type=Path, required=True)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Render daylight MP4s from a tiled L2 Zarr store "
+            "(himawari_l2.zarr/tile_N/...)."
+        )
+    )
+    parser.add_argument(
+        "--input-dir",
+        type=Path,
+        required=True,
+        help="path to the combined Zarr store containing tile_N groups",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--start", type=parse_utc, required=True)
     parser.add_argument("--end", type=parse_utc, required=True)
@@ -312,15 +347,17 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     local_timezone = ZoneInfo(args.local_timezone)
 
-    tiles = discover_tiles(input_dir, args.tiles)
+    root = open_group(input_dir)
+    tiles = discover_tiles(root, args.tiles)
     if not tiles:
-        raise RuntimeError("no tile_N.zarr stores found")
+        raise RuntimeError("no tile_N groups found in the input Zarr")
 
     records: list[dict[str, object]] = []
-    for tile_path in tiles:
+    for tile_index, tile in tiles:
         records.extend(
             process_tile(
-                tile_path,
+                tile,
+                tile_index,
                 output_dir,
                 args.start,
                 args.end,

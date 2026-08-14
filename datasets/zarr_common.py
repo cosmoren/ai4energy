@@ -34,7 +34,7 @@ from pyproj import CRS, Transformer
 # Dataset contract
 # =======================
 
-DEFAULT_INTERVAL = 15
+DEFAULT_INTERVAL = 10
 FRAME_INTERVAL = timedelta(minutes=DEFAULT_INTERVAL)
 TILE_WIDTH_M = 500_000.0
 TARGET_PIXEL_M = 5_000.0
